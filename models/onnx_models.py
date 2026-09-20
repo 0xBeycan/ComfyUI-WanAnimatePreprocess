@@ -6,20 +6,16 @@ import torch
 import onnxruntime
 
 from ..pose_utils.pose2d_utils import box_convert_simple, keypoints_from_heatmaps
+from ..install import cuda_provider_error
 
 class SimpleOnnxInference(object):
     def __init__(self, checkpoint, device='CUDAExecutionProvider', **kwargs):
         # Store initialization parameters for potential reinit
         self.checkpoint = checkpoint
         self.init_kwargs = kwargs
-        provider = [device, 'CPUExecutionProvider'] if device == 'CUDAExecutionProvider' else [device]
-
-        self.provider = provider
-        self.session = onnxruntime.InferenceSession(checkpoint, providers=provider)
-        self.input_name = self.session.get_inputs()[0].name
-        self.output_name = self.session.get_outputs()[0].name
-        self.input_resolution = self.session.get_inputs()[0].shape[2:]
-        self.input_resolution = np.array(self.input_resolution)
+        self.provider = [device]
+        self.session = None
+        self.reinit()
 
     def __call__(self, *args, **kwargs):
         return self.forward(*args, **kwargs)
@@ -42,8 +38,13 @@ class SimpleOnnxInference(object):
             self.provider = provider
 
         if self.session is None:
-            checkpoint = self.checkpoint
-            self.session = onnxruntime.InferenceSession(checkpoint, providers=self.provider)
+            session = onnxruntime.InferenceSession(self.checkpoint, providers=self.provider)
+            # onnxruntime always registers the CPU provider behind the list and only logs a
+            # warning for a provider it could not create, so the session silently runs on CPU
+            # when the CUDA build or its libraries are missing. Verify what was actually used.
+            if self.provider[0] not in session.get_providers():
+                raise RuntimeError(cuda_provider_error(self.provider[0]))
+            self.session = session
             self.input_name = self.session.get_inputs()[0].name
             self.output_name = self.session.get_outputs()[0].name
             self.input_resolution = self.session.get_inputs()[0].shape[2:]
