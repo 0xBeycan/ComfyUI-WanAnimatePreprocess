@@ -9,13 +9,13 @@ to `ComfyUI/models/detection` (subject to change in the future)
 
 YOLO:
 
-https://huggingface.co/Wan-AI/Wan2.2-Animate-14B/blob/main/process_checkpoint/det/yolov10m.onnx
+https://huggingface.co/onnx-community/yolov10x/blob/main/onnx/model.onnx (save it as `yolov10x.onnx`)
 
 ViTPose ONNX:
 
 Use either the Large model from here:
 
-https://huggingface.co/JunkyByte/easy_ViTPose/tree/main/onnx/wholebody
+https://huggingface.co/Kijai/vitpose_comfy/tree/main/onnx
 
 Or the Huge model like in the original code, it's split into two files due to ONNX file size limit:
 

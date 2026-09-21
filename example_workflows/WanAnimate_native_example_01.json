@@ -1033,8 +1033,8 @@
         "Node name for S&R": "OnnxDetectionModelLoader"
       },
       "widgets_values": [
-        "vitpose-l-wholebody.onnx",
-        "onnx\\yolov10m.onnx",
+        "vitpose_h_wholebody_model.onnx",
+        "onnx\\yolov10x.onnx",
         "CUDAExecutionProvider"
       ]
     },
@@ -1937,7 +1937,7 @@
       "title": "Preprocessor links",
       "properties": {},
       "widgets_values": [
-        "Nodes:\n\n[https://github.com/kijai/ComfyUI-WanAnimatePreprocess](https://github.com/kijai/ComfyUI-WanAnimatePreprocess)\n\nModels:\n\nYOLO:\n\n[https://huggingface.co/Wan-AI/Wan2.2-Animate-14B/blob/main/process_checkpoint/det/yolov10m.onnx](https://huggingface.co/Wan-AI/Wan2.2-Animate-14B/blob/main/process_checkpoint/det/yolov10m.onnx)\n\nViTPose\n\nLarge:\n\n[https://huggingface.co/JunkyByte/easy_ViTPose/blob/main/onnx/wholebody/vitpose-l-wholebody.onnx](https://huggingface.co/JunkyByte/easy_ViTPose/blob/main/onnx/wholebody/vitpose-l-wholebody.onnx)\n\nHuge (needs both files):\n\n[https://huggingface.co/Kijai/vitpose_comfy/blob/main/onnx/vitpose_h_wholebody_model.onnx](https://huggingface.co/Kijai/vitpose_comfy/blob/main/onnx/vitpose_h_wholebody_model.onnx)\n\n[https://huggingface.co/Kijai/vitpose_comfy/blob/main/onnx/vitpose_h_wholebody_data.bin](https://huggingface.co/Kijai/vitpose_comfy/blob/main/onnx/vitpose_h_wholebody_data.bin)"
+        "Nodes:\n\n[https://github.com/kijai/ComfyUI-WanAnimatePreprocess](https://github.com/kijai/ComfyUI-WanAnimatePreprocess)\n\nModels:\n\nYOLO:\n\n[https://huggingface.co/onnx-community/yolov10x/blob/main/onnx/model.onnx](https://huggingface.co/onnx-community/yolov10x/blob/main/onnx/model.onnx)\n\nViTPose\n\nLarge:\n\n[https://huggingface.co/Kijai/vitpose_comfy/blob/main/onnx/vitpose_l_wholebody.onnx](https://huggingface.co/Kijai/vitpose_comfy/blob/main/onnx/vitpose_l_wholebody.onnx)\n\nHuge (needs both files):\n\n[https://huggingface.co/Kijai/vitpose_comfy/blob/main/onnx/vitpose_h_wholebody_model.onnx](https://huggingface.co/Kijai/vitpose_comfy/blob/main/onnx/vitpose_h_wholebody_model.onnx)\n\n[https://huggingface.co/Kijai/vitpose_comfy/blob/main/onnx/vitpose_h_wholebody_data.bin](https://huggingface.co/Kijai/vitpose_comfy/blob/main/onnx/vitpose_h_wholebody_data.bin)"
       ],
       "color": "#432",
       "bgcolor": "#653"
