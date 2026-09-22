@@ -16,9 +16,10 @@ Per frame, from `pose_data` (keypoints, detections) and the mask:
   multi_person        the detector saw more than one person at 30% or more (warning only)
   mask_empty          no mask at all, or (on a frame with a reliable box) mask area below
                       `min_mask_to_box` of the box area
-  mask_leak           more than `max_mask_outside_box` of the mask lies outside the box
-                      grown by 10% (background or a neighbour pulled in); only checked on
-                      a frame whose box the detector and the pose model agree on
+  mask_leak           more than `max_mask_outside_box` of the mask lies outside this and the
+                      previous frame's box, grown by 10% (background or a neighbour pulled
+                      in); only checked on a frame whose box the detector and the pose model
+                      agree on
   mask_fragmented     a second region at least 5% of the largest one (a ghost, a second
                       person, a split body); smaller detached pieces such as a shadow
                       blob are reported as mask_specks (warning only)
@@ -110,10 +111,17 @@ def frame_metrics(masks, pose_metas, detections, min_keypoint_conf):
         m["box_reliable"] = bool(m["detected"] and confident.sum() >= RELIABLE_KEYPOINTS
                                  and (kps[confident, 2].mean() if confident.any() else 0) >= RELIABLE_CONF)
 
-        # mask outside the grown box
-        gx1, gy1 = int(max(0, x1 - BOX_MARGIN * bw)), int(max(0, y1 - BOX_MARGIN * bh))
-        gx2, gy2 = int(min(W, x2 + BOX_MARGIN * bw)), int(min(H, y2 + BOX_MARGIN * bh))
-        inside = int(mask[gy1:gy2, gx1:gx2].sum())
+        # mask outside the grown box, or outside the previous frame's grown box: on a blurred
+        # frame the box shrinks around the blur while the person is still where it was, and
+        # comparing against this frame's box alone reads the correct mask as a leak
+        gx1, gy1 = max(0.0, x1 - BOX_MARGIN * bw), max(0.0, y1 - BOX_MARGIN * bh)
+        gx2, gy2 = min(float(W), x2 + BOX_MARGIN * bw), min(float(H), y2 + BOX_MARGIN * bh)
+        if prev is not None and prev["detected"] and m["detected"]:
+            px1, py1, px2, py2 = prev["bbox"]
+            pbw, pbh = max(px2 - px1, 1.0), max(py2 - py1, 1.0)
+            gx1, gy1 = min(gx1, max(0.0, px1 - BOX_MARGIN * pbw)), min(gy1, max(0.0, py1 - BOX_MARGIN * pbh))
+            gx2, gy2 = max(gx2, min(float(W), px2 + BOX_MARGIN * pbw)), max(gy2, min(float(H), py2 + BOX_MARGIN * pbh))
+        inside = int(mask[int(gy1):int(gy2), int(gx1):int(gx2)].sum())
         m["mask_outside_box"] = (area - inside) / area if area else 0.0
 
         # detached regions, as fractions of the largest one
