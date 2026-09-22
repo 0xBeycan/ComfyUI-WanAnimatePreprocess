@@ -3,59 +3,42 @@
 import cv2
 import numpy as np
 import torch
-import onnxruntime
+from comfy import model_management as mm
+from comfy.model_patcher import ModelPatcher
 
 from ..pose_utils.pose2d_utils import box_convert_simple, keypoints_from_heatmaps
-from ..install import cuda_provider_error
+from .onnx_graph import GraphModule, OnnxGraph
+from .vitpose import build_vitpose
 
-class SimpleOnnxInference(object):
-    def __init__(self, checkpoint, device='CUDAExecutionProvider', **kwargs):
-        # Store initialization parameters for potential reinit
-        self.checkpoint = checkpoint
-        self.init_kwargs = kwargs
-        self.provider = [device]
-        self.session = None
-        self.reinit()
+
+def load_models(*models):
+    """Bring the models to the compute device together, freeing VRAM held by other models
+    if needed; ComfyUI moves them back out when another model needs the room."""
+    mm.load_models_gpu([m.patcher for m in models], force_full_load=True)
+
+
+class OnnxModel:
+    """An ONNX model run with torch and managed by ComfyUI like any other model."""
+
+    def __init__(self, checkpoint):
+        graph = OnnxGraph(checkpoint)
+        self.net = (build_vitpose(graph) or GraphModule(graph)).eval()
+        self.patcher = ModelPatcher(self.net, load_device=mm.get_torch_device(), offload_device=mm.unet_offload_device())
 
     def __call__(self, *args, **kwargs):
         return self.forward(*args, **kwargs)
 
-    def get_output_names(self):
-        output_names = []
-        for node in self.session.get_outputs():
-            output_names.append(node.name)
-        return output_names
+    def run(self, x):
+        dtype = next(self.net.parameters()).dtype  # fp16 exports take fp16 input
+        x = torch.from_numpy(np.ascontiguousarray(x)).to(self.patcher.load_device, dtype)
+        with torch.inference_mode():
+            out = self.net(x)
+        return out.float().cpu().numpy()
 
-    def cleanup(self):
-        if hasattr(self, 'session') and self.session is not None:
-            # Close the ONNX Runtime session
-            del self.session
-            self.session = None
 
-    def reinit(self, provider=None):
-        # Use provided provider or fall back to original provider
-        if provider is not None:
-            self.provider = provider
-
-        if self.session is None:
-            session = onnxruntime.InferenceSession(self.checkpoint, providers=self.provider)
-            # onnxruntime always registers the CPU provider behind the list and only logs a
-            # warning for a provider it could not create, so the session silently runs on CPU
-            # when the CUDA build or its libraries are missing. Verify what was actually used.
-            if self.provider[0] not in session.get_providers():
-                raise RuntimeError(cuda_provider_error(self.provider[0]))
-            self.session = session
-            self.input_name = self.session.get_inputs()[0].name
-            self.output_name = self.session.get_outputs()[0].name
-            self.input_resolution = self.session.get_inputs()[0].shape[2:]
-            self.input_resolution = np.array(self.input_resolution)
-
-class Yolo(SimpleOnnxInference):
-    def __init__(self, checkpoint, device='cuda', threshold_conf=0.05, threshold_multi_persons=0.1, input_resolution=(640, 640), threshold_iou=0.5, threshold_bbox_shape_ratio=0.4, cat_id=[1], select_type='max', strict=True, sorted_func=None, **kwargs):
-        super(Yolo, self).__init__(checkpoint, device=device, **kwargs)
-
-        model_inputs = self.session.get_inputs()
-        input_shape = model_inputs[0].shape
+class Yolo(OnnxModel):
+    def __init__(self, checkpoint, threshold_conf=0.05, threshold_multi_persons=0.1, input_resolution=(640, 640), threshold_iou=0.5, threshold_bbox_shape_ratio=0.4, cat_id=[1], select_type='max', strict=True, sorted_func=None):
+        super().__init__(checkpoint)
 
         self.input_width = 640
         self.input_height = 640
@@ -69,8 +52,6 @@ class Yolo(SimpleOnnxInference):
         self.select_type = select_type
         self.strict = strict
         self.sorted_func = sorted_func
-
-
 
     def postprocess(self, output, shape_raw, cat_id=[1]):
         """
@@ -261,7 +242,7 @@ class Yolo(SimpleOnnxInference):
             img = img.cpu().numpy()
             shape_raw = shape_raw.cpu().numpy()
 
-        outputs = self.session.run(None, {self.session.get_inputs()[0].name: img})[0]
+        outputs = self.run(img)
         person_results = [[{'bbox': np.array([0., 0., 1.*shape_raw[i][1], 1.*shape_raw[i][0], -1]), 'track_id': -1}] for i in range(len(outputs))]
 
         for i in range(len(outputs)):
@@ -269,12 +250,9 @@ class Yolo(SimpleOnnxInference):
         return person_results
 
 
-class ViTPose(SimpleOnnxInference):
-    def __init__(self, checkpoint, device='cuda', **kwargs):
-        super(ViTPose, self).__init__(checkpoint, device=device)
-
+class ViTPose(OnnxModel):
     def forward(self, img, center, scale, **kwargs):
-        heatmaps = self.session.run([], {self.session.get_inputs()[0].name: img})[0]
+        heatmaps = self.run(img)
         points, prob = keypoints_from_heatmaps(heatmaps=heatmaps,
                                             center=center,
                                             scale=scale*200,

@@ -31,7 +31,7 @@ if _detection_exts and ".onnx" not in _detection_exts:
     if hasattr(_cache_helper, "clear"):
         _cache_helper.clear()
 
-from .models.onnx_models import ViTPose, Yolo
+from .models.onnx_models import ViTPose, Yolo, load_models
 from .pose_utils.pose2d_utils import load_pose_metas_from_kp2ds_seq, crop, bbox_from_detector
 from .utils import get_face_bboxes, padding_resize, resize_by_area, resize_to_bounds
 from .pose_utils.human_visualization import AAPoseMeta, draw_aapose_by_meta_new
@@ -44,7 +44,6 @@ class OnnxDetectionModelLoader:
             "required": {
                 "vitpose_model": (folder_paths.get_filename_list("detection"), {"tooltip": "These models are loaded from the 'ComfyUI/models/detection' -folder",}),
                 "yolo_model": (folder_paths.get_filename_list("detection"), {"tooltip": "These models are loaded from the 'ComfyUI/models/detection' -folder",}),
-                "onnx_device": (["CUDAExecutionProvider", "CPUExecutionProvider"], {"default": "CUDAExecutionProvider", "tooltip": "Device to run the ONNX models on"}),
             },
         }
 
@@ -52,15 +51,15 @@ class OnnxDetectionModelLoader:
     RETURN_NAMES = ("model", )
     FUNCTION = "loadmodel"
     CATEGORY = "WanAnimatePreprocess"
-    DESCRIPTION = "Loads ONNX models for pose and face detection. ViTPose for pose estimation and YOLO for object detection."
+    DESCRIPTION = "Loads the ONNX models for pose and face detection, ViTPose for pose estimation and YOLO for person detection, and runs them with torch on ComfyUI's device."
 
-    def loadmodel(self, vitpose_model, yolo_model, onnx_device):
+    def loadmodel(self, vitpose_model, yolo_model):
 
         vitpose_model_path = folder_paths.get_full_path_or_raise("detection", vitpose_model)
         yolo_model_path = folder_paths.get_full_path_or_raise("detection", yolo_model)
 
-        vitpose = ViTPose(vitpose_model_path, onnx_device)
-        yolo = Yolo(yolo_model_path, onnx_device)
+        vitpose = ViTPose(vitpose_model_path)
+        yolo = Yolo(yolo_model_path)
 
         model = {
             "vitpose": vitpose,
@@ -104,8 +103,7 @@ class PoseAndFaceDetection:
         input_resolution=(256, 192)
         rescale = 1.25
 
-        detector.reinit()
-        pose_model.reinit()
+        load_models(detector, pose_model)
         if retarget_image is not None:
             refer_img = resize_by_area(retarget_image[0].numpy() * 255, width * height, divisor=16) / 255.0
             ref_bbox = (detector(
@@ -137,8 +135,6 @@ class PoseAndFaceDetection:
             if progress % 10 == 0:
                 comfy_pbar.update_absolute(progress)
 
-        detector.cleanup()
-
         kp2ds = []
         for img, bbox in tqdm(zip(images_np, bboxes), total=len(images_np), desc="Extracting keypoints"):
             if bbox is None or bbox[-1] <= 0 or (bbox[2] - bbox[0]) < 10 or (bbox[3] - bbox[1]) < 10:
@@ -156,8 +152,6 @@ class PoseAndFaceDetection:
             progress += 1
             if progress % 10 == 0:
                 comfy_pbar.update_absolute(progress)
-
-        pose_model.cleanup()
 
         kp2ds = np.concatenate(kp2ds, 0)
         pose_metas = load_pose_metas_from_kp2ds_seq(kp2ds, width=W, height=H)
@@ -394,8 +388,7 @@ class PoseDetectionOneToAllAnimation:
         input_resolution=(256, 192)
         rescale = 1.25
 
-        detector.reinit()
-        pose_model.reinit()
+        load_models(detector, pose_model)
 
         if ref_image is not None:
             refer_img_np = ref_image[0].numpy() * 255
@@ -431,8 +424,6 @@ class PoseDetectionOneToAllAnimation:
             if progress % 10 == 0:
                 comfy_pbar.update_absolute(progress)
 
-        detector.cleanup()
-
         kp2ds = []
         for img, bbox in tqdm(zip(images_np, bboxes), total=len(images_np), desc="Extracting keypoints"):
             if bbox is None or bbox[-1] <= 0 or (bbox[2] - bbox[0]) < 10 or (bbox[3] - bbox[1]) < 10:
@@ -450,8 +441,6 @@ class PoseDetectionOneToAllAnimation:
             progress += 1
             if progress % 10 == 0:
                 comfy_pbar.update_absolute(progress)
-
-        pose_model.cleanup()
 
         kp2ds = np.concatenate(kp2ds, 0)
         pose_metas = load_pose_metas_from_kp2ds_seq(kp2ds, width=W, height=H)
