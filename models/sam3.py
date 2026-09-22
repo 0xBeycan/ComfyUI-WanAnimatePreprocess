@@ -69,6 +69,12 @@ MAX_PROPAGATE = 3 * RESEED_INTERVAL
 MIN_TRACKED_RECALL = 0.9
 # A binary mask handed to the tracker as logits: +/- this value.
 MASK_LOGIT_SCALE = 10.0
+# The decoder is told what the person is, never what it is not, and on a close-up in a
+# cluttered room it annexes whatever is adjacent - a stuffed toy, a patch of wall. These
+# many points of the previous frame's background, inside the box and this far (as a
+# fraction of the box diagonal) from the mask it had, are given as negative prompts.
+NEGATIVE_POINTS = 8
+NEGATIVE_MARGIN = 0.04
 # Where the mask logits are cut. Slightly below zero because the boundary is soft exactly
 # where the thin parts are - loose hair, fingers, the edge of a foot - and they were left
 # a few pixels outside the mask, which the block mask downstream then makes obvious.
@@ -198,21 +204,55 @@ def decode(sam3, frame, point_inputs, box_inputs, refine):
     return logits
 
 
-def prompt_for(frame_index, bboxes, pose_metas, W, H, device, dtype):
+def background_points(previous_mask, bbox, W, H):
+    """Points inside the box that the previous frame's mask says are background, kept clear
+    of the mask by NEGATIVE_MARGIN of the box diagonal and spread over the box, in pixels."""
+    if previous_mask is None or not previous_mask.any():
+        return []
+    x1, y1, x2, y2 = (int(max(0, min(v, limit))) for v, limit in zip(bbox[:4], (W, H, W, H)))
+    if x2 - x1 < 8 or y2 - y1 < 8:
+        return []
+    inside = previous_mask[y1:y2, x1:x2]
+    if not inside.any():
+        return []
+    margin = int(NEGATIVE_MARGIN * float(np.hypot(x2 - x1, y2 - y1)))
+    free = cv2.distanceTransform((~inside).astype(np.uint8), cv2.DIST_L2, 3) > margin
+    if not free.any():
+        return []
+    # spread the points: one per cell of a grid over the box, from the cells that have room
+    rows = cols = int(np.ceil(np.sqrt(NEGATIVE_POINTS)))
+    h, w = free.shape
+    points = []
+    for r in range(rows):
+        for c in range(cols):
+            cell = free[r * h // rows:(r + 1) * h // rows, c * w // cols:(c + 1) * w // cols]
+            ys, xs = np.nonzero(cell)
+            if len(ys):
+                middle = len(ys) // 2
+                points.append((x1 + c * w // cols + int(xs[middle]), y1 + r * h // rows + int(ys[middle])))
+    return points[:NEGATIVE_POINTS]
+
+
+def prompt_for(frame_index, bboxes, pose_metas, W, H, device, dtype, previous_mask=None):
     """(box_inputs, point_inputs) for the SAM decoder in its 1008x1008 space, or (None, None)
-    when the frame has neither a detection nor a confident keypoint."""
+    when the frame has neither a detection nor a confident keypoint. The points are the
+    keypoints and the body points as positives, plus background points from the previous
+    frame's mask as negatives."""
     sx, sy = SAM3_SIZE / W, SAM3_SIZE / H
     bbox = bboxes[frame_index]
     box_inputs = None
     if bbox is not None and bbox[-1] > 0:
         box_inputs = torch.tensor([[[bbox[0] * sx, bbox[1] * sy], [bbox[2] * sx, bbox[3] * sy]]], device=device, dtype=dtype)
     kps = pose_metas[frame_index]["keypoints_body"]
-    points = [(kps[k][0], kps[k][1]) for k in PROMPT_KEYPOINTS if kps[k][2] > MIN_KEYPOINT_CONF]
-    points += body_points(kps, MIN_KEYPOINT_CONF, W / H)
+    positive = [(kps[k][0] * W, kps[k][1] * H) for k in PROMPT_KEYPOINTS if kps[k][2] > MIN_KEYPOINT_CONF]
+    positive += [(x * W, y * H) for x, y in body_points(kps, MIN_KEYPOINT_CONF, W / H)]
+    negative = background_points(previous_mask, bbox, W, H) if bbox is not None and bbox[-1] > 0 else []
     point_inputs = None
-    if points:
-        point_inputs = {"point_coords": torch.tensor([[(x * SAM3_SIZE, y * SAM3_SIZE) for x, y in points]], device=device, dtype=dtype),
-                        "point_labels": torch.ones(1, len(points), dtype=torch.int32, device=device)}
+    if positive:
+        coords = [(x * sx, y * sy) for x, y in positive + negative]
+        labels = [1] * len(positive) + [0] * len(negative)
+        point_inputs = {"point_coords": torch.tensor([coords], device=device, dtype=dtype),
+                        "point_labels": torch.tensor([labels], dtype=torch.int32, device=device)}
     return box_inputs, point_inputs
 
 
@@ -271,7 +311,8 @@ def segment_frames(model, images, bboxes, pose_metas, refine=True, temporal=True
     i = 0
     seed_frame, seed_count = -1, 0
     while i < N:
-        box_inputs, point_inputs = prompt_for(i, bboxes, pose_metas, W, H, device, dtype)
+        previous = masks[i - 1].numpy() > 0.5 if i > 0 and masks[i - 1].any() else None
+        box_inputs, point_inputs = prompt_for(i, bboxes, pose_metas, W, H, device, dtype, previous)
         if box_inputs is None or point_inputs is None:
             # nothing to describe the person with: carry the track on if there is one, else
             # leave this frame without a mask (the guard reports it as pose, not mask)
