@@ -33,7 +33,7 @@ def snap_to_frame(bbox, W, H):
                      float(bbox[4])])
 
 
-def detect(detector, pose_model, images, face_padding=0, sam3_model="none"):
+def detect(detector, pose_model, images, face_padding=0, sam3_model=None):
     """Runs the detector and the pose model on every frame of `images` [B, H, W, 3].
 
     Returns (pose_data, face_images, mask): pose_data carries the per-frame pose metas
@@ -41,8 +41,8 @@ def detect(detector, pose_model, images, face_padding=0, sam3_model="none"):
     normalised keypoints) and `detections` (the chosen person box as it prompts the mask,
     extended to frame edges it nearly touches, its score, -1 when nothing was detected and
     the whole frame was used, and the number of people the detector was fairly sure of);
-    face_images are 512x512 crops around the face; mask is the SAM3 person mask, empty
-    when no SAM3 checkpoint is selected."""
+    face_images are 512x512 crops around the face; mask is the SAM3 person mask from the
+    checkpoint `sam3_model`, empty when None."""
     B, H, W, C = images.shape
     shape = np.array([H, W])[None]
     images_np = images.numpy()
@@ -106,7 +106,7 @@ def detect(detector, pose_model, images, face_padding=0, sam3_model="none"):
             for box, count in zip(prompt_boxes, person_counts)
         ],
     }
-    if sam3_model != "none":
+    if sam3_model is not None:
         result = {}
         with log.step(f"segmenting the person with {sam3_model} on {B} frames", result):
             mask = segment_frames(load_sam3(sam3_model), images, prompt_boxes, pose_metas)
@@ -114,7 +114,7 @@ def detect(detector, pose_model, images, face_padding=0, sam3_model="none"):
             result["empty masks"] = int((coverage == 0).sum())
             result["mask coverage"] = f"{coverage.min() * 100:.1f}-{coverage.max() * 100:.1f}%"
     else:
-        log.info("no SAM3 checkpoint selected, the mask output is empty")
+        log.info("no SAM3 checkpoint, the mask output is empty")
         mask = torch.zeros(B, H, W)
     return pose_data, torch.from_numpy(np.stack(face_images, 0)), mask
 

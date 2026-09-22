@@ -47,12 +47,6 @@ def drop_islands(mask):
     return np.isin(labels, keep).astype(np.uint8)
 
 
-def sam3_choices():
-    """SAM3 checkpoints in models/checkpoints (by name), plus the default before it exists."""
-    names = [n for n in folder_paths.get_filename_list("checkpoints") if "sam3" in os.path.basename(n).lower()]
-    return ["none"] + sorted(set(names) | {DEFAULT_SAM3})
-
-
 _loaded = {"name": None, "model": None}
 
 

@@ -12,9 +12,9 @@ models take part in ComfyUI's memory management like any other model.
 
 ### WanAnimate Preprocess
 
-Inputs: the frames (`images`), the model choices (`vitpose_model`, `yolo_model`,
-`sam3_model`) and the drawing options (`body_stick_width`, `hand_stick_width`,
-`draw_head`, `face_padding`).
+Inputs: the frames (`images`) and the drawing options (`body_stick_width`,
+`hand_stick_width`, `draw_head`, `face_padding`). The models are fixed (YOLOv10x,
+ViTPose-H wholebody, SAM 3.1 multiplex) and downloaded on first use.
 
 Outputs: `pose_images` (the drawn pose, at the frame size so it lines up with the frames
 and the mask - feed the node frames already at the generation size), `face_images`
@@ -23,10 +23,11 @@ the guard).
 
 Per frame: YOLO finds the person, ViTPose gives body / hand / face keypoints from that box,
 the face is cropped around the face keypoints, and SAM3 segments the person from the box
-and the body keypoints given to its decoder as a box and positive points. There is no text
-prompt and no tracker: frames are independent, so nothing drifts or ghosts over long clips,
-and each mask is as good as that frame's detection. Islands far smaller than the main region
-are dropped. With `sam3_model` set to `none` the mask output is empty.
+and the body keypoints given to its decoder as a box and positive points. A box that stops
+just short of a frame edge is extended to it, so a person the frame cuts off is masked down
+to the edge. There is no text prompt and no tracker: frames are independent, so nothing
+drifts or ghosts over long clips, and each mask is as good as that frame's detection.
+Islands far smaller than the main region are dropped.
 
 The console shows every step with its duration and what it produced (frames without a
 person, fallback face crops, empty masks, mask coverage).
@@ -53,8 +54,7 @@ still produced.
 
 ## Models
 
-The model widgets list the defaults before they exist and download them on the first run
-that selects them:
+Downloaded on the first run that needs them:
 
 - `yolov10x.onnx` and `vitpose_h_wholebody_model.onnx` (+ `vitpose_h_wholebody_data.bin`)
   into `ComfyUI/models/detection`, from
@@ -64,14 +64,10 @@ that selects them:
 - `sam3.1_multiplex_fp16.safetensors` into `ComfyUI/models/checkpoints`, from
   [Comfy-Org/sam3.1](https://huggingface.co/Comfy-Org/sam3.1), 1.7 GB
 
-Other files in those folders are listed too. Any fp32 or fp16 ONNX export of these model
-families loads: YOLOv10 n / s / m / x (also exports with the raw `[1, 84, N]` output),
-ViTPose wholebody s / b / l / h. ViTPose graphs become a native torch module (fused
-LayerNorm, GELU and scaled-dot-product attention); everything else runs through a generic
-ONNX-op executor (`models/onnx_graph.py`) covering the standard op set of CNN and ViT
-exports. Quantized exports are not supported; an unsupported op is reported when the model
-is loaded, naming the op. SAM3 is ComfyUI's own implementation, so any SAM 3 / 3.1
-checkpoint the core loader accepts works.
+The ONNX models run through this package's own torch executor: ViTPose becomes a native
+torch module (`models/vitpose.py`, fused LayerNorm, GELU and scaled-dot-product
+attention), YOLO runs through a generic ONNX-op executor (`models/onnx_graph.py`). SAM3 is
+ComfyUI's own implementation.
 
 ## Tests
 

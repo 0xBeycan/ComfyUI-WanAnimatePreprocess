@@ -6,7 +6,7 @@ from . import log
 from .guard import run_guard
 from .models.download import download
 from .models.onnx_models import ViTPose, Yolo
-from .models.sam3 import DEFAULT_SAM3, sam3_choices
+from .models.sam3 import DEFAULT_SAM3
 from .preprocess import detect, draw
 
 _detection_path = os.path.join(folder_paths.models_dir, "detection")
@@ -20,53 +20,42 @@ if _exts and ".onnx" not in _exts:
     folder_paths.folder_names_and_paths["detection"] = (_paths, set(_exts) | {".onnx"})
     getattr(folder_paths, "filename_list_cache", {}).pop("detection", None)
 
-# The default models, fetched on first use when they are not in models/detection. Each
-# entry lists every file the model needs.
-DEFAULT_VITPOSE = "vitpose_h_wholebody_model.onnx"
-DEFAULT_YOLO = "yolov10x.onnx"
-DEFAULT_MODELS = {
-    DEFAULT_VITPOSE: (
+# The models the node runs, fetched on first use when they are not in models/detection.
+# Each entry lists every file the model needs.
+VITPOSE = "vitpose_h_wholebody_model.onnx"
+YOLO = "yolov10x.onnx"
+MODELS = {
+    VITPOSE: (
         ("vitpose_h_wholebody_model.onnx", "https://huggingface.co/Kijai/vitpose_comfy/resolve/main/onnx/vitpose_h_wholebody_model.onnx"),
         ("vitpose_h_wholebody_data.bin", "https://huggingface.co/Kijai/vitpose_comfy/resolve/main/onnx/vitpose_h_wholebody_data.bin"),
     ),
-    DEFAULT_YOLO: (
+    YOLO: (
         ("yolov10x.onnx", "https://huggingface.co/onnx-community/yolov10x/resolve/main/onnx/model.onnx"),
     ),
 }
 
 
-def detection_model_choices():
-    """Files in models/detection plus the defaults, which are listed before they exist so a
-    workflow can select them and have them downloaded on its first run."""
-    return sorted(set(folder_paths.get_filename_list("detection")) | set(DEFAULT_MODELS))
-
-
 def detection_model_path(name):
-    """Full path of a model in models/detection; a default model that is missing (or missing
-    one of its files) is downloaded first, next to the .onnx if that already exists."""
-    files = DEFAULT_MODELS.get(name, ())
-    if files:
-        found = folder_paths.get_full_path("detection", name)
-        target_dir = os.path.dirname(found) if found else _detection_path
-        os.makedirs(target_dir, exist_ok=True)
-        for filename, url in files:
-            if not os.path.isfile(os.path.join(target_dir, filename)):
-                download(url, os.path.join(target_dir, filename))
+    """Full path of a model in models/detection; when it (or one of its files) is missing it
+    is downloaded first, next to the .onnx if that already exists."""
+    found = folder_paths.get_full_path("detection", name)
+    target_dir = os.path.dirname(found) if found else _detection_path
+    os.makedirs(target_dir, exist_ok=True)
+    for filename, url in MODELS[name]:
+        if not os.path.isfile(os.path.join(target_dir, filename)):
+            download(url, os.path.join(target_dir, filename))
     return folder_paths.get_full_path_or_raise("detection", name)
 
 
-_detection_models = {"names": None, "models": None}
+_detection_models = {"models": None}
 
 
-def load_detection_models(vitpose_model, yolo_model):
-    """The ViTPose and YOLO models, built once and kept for the same selection."""
-    if _detection_models["names"] == (vitpose_model, yolo_model):
-        return _detection_models["models"]
-    _detection_models["names"], _detection_models["models"] = None, None
-    with log.step(f"building {vitpose_model} and {yolo_model}"):
-        models = (ViTPose(detection_model_path(vitpose_model)), Yolo(detection_model_path(yolo_model)))
-    _detection_models["names"], _detection_models["models"] = (vitpose_model, yolo_model), models
-    return models
+def load_detection_models():
+    """The ViTPose and YOLO models, built once and kept."""
+    if _detection_models["models"] is None:
+        with log.step(f"building {VITPOSE} and {YOLO}"):
+            _detection_models["models"] = (ViTPose(detection_model_path(VITPOSE)), Yolo(detection_model_path(YOLO)))
+    return _detection_models["models"]
 
 
 class WanAnimatePreprocess:
@@ -75,9 +64,6 @@ class WanAnimatePreprocess:
         return {
             "required": {
                 "images": ("IMAGE",),
-                "vitpose_model": (detection_model_choices(), {"default": DEFAULT_VITPOSE, "tooltip": f"Loaded from the 'ComfyUI/models/detection' folder; {DEFAULT_VITPOSE} is downloaded on first use when missing"}),
-                "yolo_model": (detection_model_choices(), {"default": DEFAULT_YOLO, "tooltip": f"Loaded from the 'ComfyUI/models/detection' folder; {DEFAULT_YOLO} is downloaded on first use when missing"}),
-                "sam3_model": (sam3_choices(), {"default": DEFAULT_SAM3, "tooltip": "SAM 3 / 3.1 checkpoint from 'ComfyUI/models/checkpoints' (sam3.1_multiplex_fp16.safetensors is downloaded on first use when missing). Every frame's person is segmented from its detected bbox and body keypoints, no text prompt and no tracking; 'none' leaves the mask output empty"}),
                 "body_stick_width": ("INT", {"default": -1, "min": -1, "max": 20, "step": 1, "tooltip": "Width of the body sticks in the pose images; 0 leaves the body out, -1 picks it from the frame size"}),
                 "hand_stick_width": ("INT", {"default": -1, "min": -1, "max": 20, "step": 1, "tooltip": "Width of the hand sticks in the pose images; 0 leaves the hands out, -1 picks it from the frame size"}),
                 "draw_head": ("BOOLEAN", {"default": True, "tooltip": "Whether to draw head keypoints"}),
@@ -89,11 +75,11 @@ class WanAnimatePreprocess:
     RETURN_NAMES = ("pose_images", "face_images", "mask", "pose_data")
     FUNCTION = "process"
     CATEGORY = "WanAnimate"
-    DESCRIPTION = "The whole WanAnimate preprocess in one node: loads the selected ViTPose, YOLO and SAM3 models (downloading the defaults when missing), detects the person's pose and face on every frame, segments the person from its bbox and keypoints, and draws the pose images at the frame size. Feed it frames already at the generation size."
+    DESCRIPTION = "The whole WanAnimate preprocess in one node: YOLOv10x finds the person, ViTPose-H gives the keypoints, the face is cropped, SAM 3.1 segments the person from the box and keypoints, and the pose images are drawn at the frame size. The models are downloaded on first use. Feed it frames already at the generation size."
 
-    def process(self, images, vitpose_model, yolo_model, sam3_model, body_stick_width, hand_stick_width, draw_head, face_padding):
-        pose_model, detector = load_detection_models(vitpose_model, yolo_model)
-        pose_data, face_images, mask = detect(detector, pose_model, images, face_padding=face_padding, sam3_model=sam3_model)
+    def process(self, images, body_stick_width, hand_stick_width, draw_head, face_padding):
+        pose_model, detector = load_detection_models()
+        pose_data, face_images, mask = detect(detector, pose_model, images, face_padding=face_padding, sam3_model=DEFAULT_SAM3)
         pose_images = draw(pose_data, body_stick_width, hand_stick_width, draw_head)
         return (pose_images, face_images, mask, pose_data)
 
