@@ -50,6 +50,15 @@ MIN_KEYPOINT_CONF = 0.3
 # hundred frames), so it is re-anchored well before that; the memory is what keeps the
 # mask through frames the pose model loses to motion blur.
 RESEED_INTERVAL = 24
+# Re-seeding only helps from a frame the pose model is sure about: the first attempt
+# re-seeded on schedule and landed on a motion-blurred frame, which replaced a good
+# propagated mask with a bad prompt. A frame is an anchor when the detector found the
+# person and this many keypoints are confident, this confident on average.
+MIN_ANCHOR_KEYPOINTS = 8
+MIN_ANCHOR_CONF = 0.5
+# Propagating for longer than this without an anchor is not worth the drift risk: re-seed
+# from whatever the frame offers.
+MAX_PROPAGATE = 3 * RESEED_INTERVAL
 # A propagated mask that stops covering this fraction of the frame's confident keypoints
 # has come off the person: re-seed immediately.
 MIN_TRACKED_RECALL = 0.9
@@ -212,6 +221,15 @@ def keypoint_recall(mask, kps, W, H):
     return sum(1 for x, y in confident if mask[y, x]) / len(confident)
 
 
+def is_anchor(frame_index, bboxes, pose_metas):
+    """Whether this frame's detection and pose are good enough to re-seed the tracker from."""
+    bbox = bboxes[frame_index]
+    if bbox is None or bbox[-1] <= 0:
+        return False
+    conf = [c for _, _, c in pose_metas[frame_index]["keypoints_body"] if c > MIN_KEYPOINT_CONF]
+    return len(conf) >= MIN_ANCHOR_KEYPOINTS and sum(conf) / len(conf) >= MIN_ANCHOR_CONF
+
+
 def clean(mask):
     """A person's mask: no enclosed holes, no islands far smaller than the body."""
     return drop_islands(fill_holes(mask.astype(np.uint8)))
@@ -222,11 +240,14 @@ def segment_frames(model, images, bboxes, pose_metas, refine=True, temporal=True
 
     `bboxes[i]` is frame i's detector box as (x1, y1, x2, y2, score); a score of -1 means
     nothing was detected. `pose_metas[i]["keypoints_body"]` are its body keypoints,
-    normalised to the frame, with confidence. The first frame of every segment is prompted
-    with that box and those keypoints, the tracker then propagates the mask with its memory,
-    and a new segment starts every RESEED_INTERVAL frames or as soon as the propagated mask
-    stops covering the keypoints. With `temporal` off, every frame is prompted on its own
-    (no memory), which is worse through motion blur but does not depend on the tracker."""
+    normalised to the frame, with confidence.
+
+    A frame the detector and the pose model agree on is prompted with that box and those
+    keypoints; the tracker's memory then propagates the mask, which is what carries it
+    through frames the pose model loses to motion blur. The tracker is re-seeded from a
+    fresh prompt every RESEED_INTERVAL frames - but only on a frame that is an anchor, and
+    immediately when the propagated mask stops covering the keypoints. With `temporal` off,
+    every frame is prompted on its own, without the tracker."""
     N, H, W, _ = images.shape
     mm.load_model_gpu(model)
     device, dtype = mm.get_torch_device(), model.model.get_dtype()
@@ -234,11 +255,11 @@ def segment_frames(model, images, bboxes, pose_metas, refine=True, temporal=True
     frames_chw = images[..., :3].movedim(-1, 1)
     masks = torch.zeros(N, H, W)
     pbar = ProgressBar(N)
+    seeds = forced = 0
     i = 0
-    seeds = 0
     while i < N:
         box_inputs, point_inputs = prompt_for(i, bboxes, pose_metas, W, H, device, dtype)
-        if box_inputs is None and point_inputs is None:
+        if box_inputs is None and point_inputs is None:   # nothing to describe the person with
             pbar.update(1)
             i += 1
             continue
@@ -248,24 +269,37 @@ def segment_frames(model, images, bboxes, pose_metas, refine=True, temporal=True
             seed = (F.interpolate(logits.float(), size=(H, W), mode="bilinear", align_corners=False)[0, 0] > 0).cpu().numpy()
         masks[i] = torch.from_numpy(clean(seed)).float()
         seeds += 1
+        seed_frame = i
         pbar.update(1)
         i += 1
-        if not temporal:
+        if not temporal or i >= N:
             continue
-        # propagate from this frame with the tracker's memory
-        end = min(i + RESEED_INTERVAL - 1, N)
-        if end <= i:
-            continue
-        with torch.inference_mode():
-            tracked = propagate(sam3, frames_chw[i - 1:end], masks[i - 1], device, dtype, H, W)
-        for k, mask in enumerate(tracked, start=i):
-            kps = pose_metas[k]["keypoints_body"]
-            if keypoint_recall(mask, kps, W, H) < MIN_TRACKED_RECALL:
-                break   # the mask came off the person: re-seed from this frame's prompt
-            masks[k] = torch.from_numpy(clean(mask)).float()
-            pbar.update(1)
-            i = k + 1
-    log.info(f"tracked {N} frames from {seeds} prompted frame(s)")
+        # propagate from the seeded frame; accept frames while the mask still covers the
+        # keypoints, and stop at the first anchor once the interval is up
+        while i < N:
+            end = min(i + RESEED_INTERVAL, N)
+            with torch.inference_mode():
+                tracked = propagate(sam3, frames_chw[i - 1:end], masks[i - 1], device, dtype, H, W)
+            if not tracked:
+                break
+            stop = False
+            for k, mask in enumerate(tracked, start=i):
+                if keypoint_recall(mask, pose_metas[k]["keypoints_body"], W, H) < MIN_TRACKED_RECALL:
+                    stop = True
+                    break
+                masks[k] = torch.from_numpy(clean(mask)).float()
+                pbar.update(1)
+                i = k + 1
+                if i - seed_frame >= RESEED_INTERVAL and (is_anchor(i, bboxes, pose_metas) if i < N else True):
+                    stop = True
+                    break
+                if i - seed_frame >= MAX_PROPAGATE:
+                    forced += 1
+                    stop = True
+                    break
+            if stop:
+                break
+    log.info(f"tracked {N} frames from {seeds} prompted frame(s)" + (f", {forced} of them without a confident pose" if forced else ""))
     return masks
 
 
