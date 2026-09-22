@@ -2,13 +2,12 @@
 
     python tests/compare_onnxruntime.py path/to/model.onnx [--device cuda] [--image frame.png] [--fp16]
 
-Runs the model through this repo's loader (native ViTPose module or the generic graph
-executor) and through onnxruntime, prints the max abs difference per output and the time
-per run. With --image, a YOLO model (640x640 input) gets the image scaled to 640x640 in
-[0, 1] and the confident detections of both runs are printed; a ViTPose model (256x192
-input) gets a centre crop with ImageNet normalisation and the heatmap argmax agreement
-is printed. Without --image the input is random noise, which is fine for ViTPose but
-makes YOLO's TopK pick different low-score rows, so only the tensor diffs mean anything.
+Runs the model through this repo's graph executor and through onnxruntime, prints the max
+abs difference per output and the time per run. With --image, a YOLO model (640x640 input)
+gets the image scaled to 640x640 in [0, 1] and the confident detections of both runs are
+printed; any other model gets a centre crop with ImageNet normalisation. Without --image
+the input is random noise, which makes YOLO's TopK pick different low-score rows, so only
+the tensor diffs mean anything.
 
 onnxruntime is not a dependency of the node; install it (onnxruntime or onnxruntime-gpu)
 to run this.
@@ -61,19 +60,15 @@ def main():
 
     import onnxruntime as ort
 
-    onnx_graph, vitpose = _load("onnx_graph"), _load("vitpose")
+    onnx_graph = _load("onnx_graph")
     t0 = time.time()
     graph = onnx_graph.OnnxGraph(args.model)
-    net = vitpose.build_vitpose(graph)
-    kind = "native ViTPose module" if net is not None else "generic graph executor"
-    if net is None:
-        net = onnx_graph.GraphModule(graph)
-    net = net.eval().to(args.device)
+    net = onnx_graph.GraphModule(graph).eval().to(args.device)
     if args.fp16:
         net = net.half()
     # same rule as models/onnx_models.py: the executor runs the graph's own Cast nodes
-    dtype = next(net.parameters()).dtype if (kind.startswith("native") or args.fp16) else graph.input_dtypes[graph.inputs[0]]
-    print(f"{os.path.basename(args.model)}: {kind}, opset {graph.opset}, {len(graph.nodes)} nodes, "
+    dtype = next(net.parameters()).dtype if args.fp16 else graph.input_dtypes[graph.inputs[0]]
+    print(f"{os.path.basename(args.model)}: opset {graph.opset}, {len(graph.nodes)} nodes, "
           f"built in {time.time() - t0:.1f}s, torch {args.device} {dtype}")
 
     shape = [d if isinstance(d, int) else 1 for d in graph.input_shapes[graph.inputs[0]]]

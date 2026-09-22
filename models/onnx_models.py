@@ -6,15 +6,16 @@ import torch
 from comfy import model_management as mm
 from comfy.model_patcher import ModelPatcher
 
-from ..pose_utils.pose2d_utils import box_convert_simple, keypoints_from_heatmaps
+from ..pose_utils.pose2d_utils import box_convert_simple
 from .onnx_graph import GraphModule, OnnxGraph
-from .vitpose import build_vitpose
 
 
 def load_models(*models):
     """Bring the models to the compute device together, freeing VRAM held by other models
-    if needed; ComfyUI moves them back out when another model needs the room."""
-    mm.load_models_gpu([m.patcher for m in models], force_full_load=True)
+    if needed; ComfyUI moves them back out when another model needs the room. A model can
+    be more than one ComfyUI model - SDPose is a U-Net and a VAE - and they are loaded in
+    one call so ComfyUI does not evict one of them to make room for the next."""
+    mm.load_models_gpu([p for m in models for p in m.patchers], force_full_load=True)
 
 
 class OnnxModel:
@@ -25,14 +26,14 @@ class OnnxModel:
         if len(graph.inputs) != 1 or len(graph.outputs) != 1:
             raise ValueError(f"{checkpoint} has {len(graph.inputs)} inputs and {len(graph.outputs)} outputs; "
                              "the detection models take one image and return one tensor")
-        native = build_vitpose(graph)
-        self.net = (native or GraphModule(graph)).eval()
-        # the graph executor runs the model's own Cast nodes, so it takes the declared input
-        # type; the native ViTPose module skips them and takes its weights' type
-        self.input_dtype = graph.input_dtypes[graph.inputs[0]] if native is None else next(self.net.parameters()).dtype
+        self.net = GraphModule(graph).eval()
+        # the graph executor runs the model's own Cast nodes, so it takes the declared
+        # input type
+        self.input_dtype = graph.input_dtypes[graph.inputs[0]]
         if not self.input_dtype.is_floating_point:
             raise ValueError(f"{checkpoint} takes {self.input_dtype} input; the detection models are fed float images")
         self.patcher = ModelPatcher(self.net, load_device=mm.get_torch_device(), offload_device=mm.unet_offload_device())
+        self.patchers = [self.patcher]
 
     def __call__(self, *args, **kwargs):
         return self.forward(*args, **kwargs)
@@ -262,13 +263,3 @@ class Yolo(OnnxModel):
             self.postprocess_threading(outputs, shape_raw, person_results, i, **kwargs)
         return person_results
 
-
-class ViTPose(OnnxModel):
-    def forward(self, img, center, scale, **kwargs):
-        heatmaps = self.run(img)
-        points, prob = keypoints_from_heatmaps(heatmaps=heatmaps,
-                                            center=center,
-                                            scale=scale*200,
-                                            unbiased=True,
-                                            use_udp=False)
-        return np.concatenate([points, prob], axis=2)

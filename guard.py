@@ -2,7 +2,7 @@
 
 Every check is normalised by the person's size (the detector box) and, where possible,
 crosses one signal with another that was produced independently: the SAM mask against the
-ViTPose keypoints, the mask's motion against the box's motion. Pure geometry on the mask
+SDPose keypoints, the mask's motion against the box's motion. Pure geometry on the mask
 cannot tell a stable wrong mask from a right one; the pose can.
 
 Per frame, from `pose_data` (keypoints, detections) and the mask:

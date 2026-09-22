@@ -5,8 +5,9 @@ import folder_paths
 from . import log
 from .guard import run_guard
 from .models.download import download
-from .models.onnx_models import ViTPose, Yolo
+from .models.onnx_models import Yolo
 from .models.sam3 import DEFAULT_SAM3
+from .models.sdpose import load_sdpose
 from .preprocess import detect, draw
 
 _detection_path = os.path.join(folder_paths.models_dir, "detection")
@@ -21,14 +22,10 @@ if _exts and ".onnx" not in _exts:
     getattr(folder_paths, "filename_list_cache", {}).pop("detection", None)
 
 # The models the node runs, fetched on first use when they are not in models/detection.
-# Each entry lists every file the model needs.
-VITPOSE = "vitpose_h_wholebody_model.onnx"
+# Each entry lists every file the model needs. The pose model is not here: it is a ComfyUI
+# checkpoint and lives in models/checkpoints (see models/sdpose.py).
 YOLO = "yolov10x.onnx"
 MODELS = {
-    VITPOSE: (
-        ("vitpose_h_wholebody_model.onnx", "https://huggingface.co/Kijai/vitpose_comfy/resolve/main/onnx/vitpose_h_wholebody_model.onnx"),
-        ("vitpose_h_wholebody_data.bin", "https://huggingface.co/Kijai/vitpose_comfy/resolve/main/onnx/vitpose_h_wholebody_data.bin"),
-    ),
     YOLO: (
         ("yolov10x.onnx", "https://huggingface.co/onnx-community/yolov10x/resolve/main/onnx/model.onnx"),
     ),
@@ -51,10 +48,11 @@ _detection_models = {"models": None}
 
 
 def load_detection_models():
-    """The ViTPose and YOLO models, built once and kept."""
+    """The SDPose and YOLO models, built once and kept."""
     if _detection_models["models"] is None:
-        with log.step(f"building {VITPOSE} and {YOLO}"):
-            _detection_models["models"] = (ViTPose(detection_model_path(VITPOSE)), Yolo(detection_model_path(YOLO)))
+        with log.step(f"building {YOLO}"):
+            detector = Yolo(detection_model_path(YOLO))
+        _detection_models["models"] = (load_sdpose(), detector)
     return _detection_models["models"]
 
 
@@ -75,7 +73,7 @@ class WanAnimatePreprocess:
     RETURN_NAMES = ("pose_images", "face_images", "mask", "pose_data")
     FUNCTION = "process"
     CATEGORY = "WanAnimate"
-    DESCRIPTION = "The whole WanAnimate preprocess in one node: YOLOv10x finds the person, ViTPose-H gives the keypoints, the face is cropped, SAM 3.1 segments the person from the box and keypoints, and the pose images are drawn at the frame size. The models are downloaded on first use. Feed it frames already at the generation size."
+    DESCRIPTION = "The whole WanAnimate preprocess in one node: YOLOv10x finds the person, SDPose-Wholebody gives the keypoints, the face is cropped, SAM 3.1 segments the person from the box and keypoints, and the pose images are drawn at the frame size. The models are downloaded on first use. Feed it frames already at the generation size."
 
     def process(self, images, body_stick_width, hand_stick_width, draw_head, face_padding):
         pose_model, detector = load_detection_models()

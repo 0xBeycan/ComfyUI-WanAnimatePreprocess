@@ -14,14 +14,14 @@ models take part in ComfyUI's memory management like any other model.
 
 Inputs: the frames (`images`) and the drawing options (`body_stick_width`,
 `hand_stick_width`, `draw_head`, `face_padding`). The models are fixed (YOLOv10x,
-ViTPose-H wholebody, SAM 3.1 multiplex) and downloaded on first use.
+SDPose-Wholebody, SAM 3.1 multiplex) and downloaded on first use.
 
 Outputs: `pose_images` (the drawn pose, at the frame size so it lines up with the frames
 and the mask - feed the node frames already at the generation size), `face_images`
 (512x512 crops around the face), `mask` (the person, every frame) and `pose_data` (for
 the guard).
 
-Per frame: YOLO finds the person, ViTPose gives body / hand / face keypoints from that box,
+Per frame: YOLO finds the person, SDPose gives body / hand / face keypoints from that box,
 the face is cropped around the face keypoints, and SAM3 segments the person from the box
 and the body keypoints given to its decoder as a box and positive points. A box that stops
 just short of a frame edge is extended to it, so a person the frame cuts off is masked down
@@ -56,18 +56,17 @@ still produced.
 
 Downloaded on the first run that needs them:
 
-- `yolov10x.onnx` and `vitpose_h_wholebody_model.onnx` (+ `vitpose_h_wholebody_data.bin`)
-  into `ComfyUI/models/detection`, from
+- `yolov10x.onnx` into `ComfyUI/models/detection`, from
   [onnx-community/yolov10x](https://huggingface.co/onnx-community/yolov10x/blob/main/onnx/model.onnx)
-  (saved under the name above) and
-  [Kijai/vitpose_comfy](https://huggingface.co/Kijai/vitpose_comfy/tree/main/onnx), about 2.7 GB
+  (saved under the name above), 113 MB
+- `sdpose_wholebody_fp16.safetensors` into `ComfyUI/models/checkpoints`, from
+  [Comfy-Org/SDPose](https://huggingface.co/Comfy-Org/SDPose), 1.9 GB
 - `sam3.1_multiplex_fp16.safetensors` into `ComfyUI/models/checkpoints`, from
   [Comfy-Org/sam3.1](https://huggingface.co/Comfy-Org/sam3.1), 1.7 GB
 
-The ONNX models run through this package's own torch executor: ViTPose becomes a native
-torch module (`models/vitpose.py`, fused LayerNorm, GELU and scaled-dot-product
-attention), YOLO runs through a generic ONNX-op executor (`models/onnx_graph.py`). SAM3 is
-ComfyUI's own implementation.
+YOLO runs through this package's own generic ONNX-op executor (`models/onnx_graph.py`).
+SDPose and SAM3 are ComfyUI's own implementations, loaded as ComfyUI checkpoints, so they
+take part in its memory management; SDPose needs ComfyUI 0.36 or newer.
 
 ## Tests
 

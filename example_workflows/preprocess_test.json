@@ -476,7 +476,7 @@
       "color": "#432",
       "bgcolor": "#653",
       "widgets_values": [
-        "Preprocess test\n\nPut the driving video in ComfyUI/input and pick it in Load Video.\nResize to the generation size first: the pose images and the mask come out\nat the size of the frames this node is given.\n\nThe models (yolov10x, ViTPose-H wholebody, SAM 3.1 multiplex) download on\nthe first run, about 4.4 GB.\n\nThe guard stops the run and prints the report when the pose or the mask\nlooks wrong; switch pose_guard / mask_guard off to only look at the report,\nthe metrics and the timeline.\n\nEverything is saved under ComfyUI/output/preprocess-test/."
+        "Preprocess test\n\nPut the driving video in ComfyUI/input and pick it in Load Video.\nResize to the generation size first: the pose images and the mask come out\nat the size of the frames this node is given.\n\nThe models (yolov10x, SDPose-Wholebody, SAM 3.1 multiplex) download on\nthe first run, about 3.7 GB.\n\nThe guard stops the run and prints the report when the pose or the mask\nlooks wrong; switch pose_guard / mask_guard off to only look at the report,\nthe metrics and the timeline.\n\nEverything is saved under ComfyUI/output/preprocess-test/."
       ]
     }
   ],

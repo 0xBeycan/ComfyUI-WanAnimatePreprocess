@@ -1,5 +1,5 @@
 """The Wan Animate preprocess, frame by frame: person box (YOLO), body / hand / face
-keypoints (ViTPose), face crops, the person mask (SAM3) and the drawn pose images."""
+keypoints (SDPose), face crops, the person mask (SAM3) and the drawn pose images."""
 import cv2
 import numpy as np
 import torch
@@ -13,9 +13,10 @@ from .pose_utils.human_visualization import draw_aapose_by_meta_new
 from .pose_utils.pose2d_utils import AAPoseMeta, bbox_from_detector, crop, load_pose_metas_from_kp2ds_seq
 from .utils import get_face_bboxes
 
-IMG_NORM_MEAN = np.array([0.485, 0.456, 0.406])
-IMG_NORM_STD = np.array([0.229, 0.224, 0.225])
-POSE_INPUT_RESOLUTION = (256, 192)
+# The crop SDPose was trained on, as (height, width). It keeps the 4:3 shape the pose
+# crop always had, so the box the detector gives still maps onto the whole crop; the model
+# just sees it four times as large on each axis.
+POSE_INPUT_RESOLUTION = (1024, 768)
 POSE_CROP_RESCALE = 1.25
 FACE_CROP_SCALE = 1.3
 FACE_SIZE = 512
@@ -72,9 +73,9 @@ def detect(detector, pose_model, images, face_padding=0, sam3_model=None):
     with log.step(f"extracting keypoints on {B} frames"):
         for i, (img, bbox) in enumerate(tqdm(zip(images_np, bboxes), total=B, desc="Extracting keypoints")):
             center, scale = bbox_from_detector(bbox, POSE_INPUT_RESOLUTION, rescale=POSE_CROP_RESCALE)
+            # SDPose feeds the crop to a VAE, which takes it in 0..1 and scales it itself
             img = crop(img, center, scale, POSE_INPUT_RESOLUTION)[0]
-            img_norm = ((img - IMG_NORM_MEAN) / IMG_NORM_STD).transpose(2, 0, 1).astype(np.float32)
-            kp2ds.append(pose_model(img_norm[None], np.array(center)[None], np.array(scale)[None]))
+            kp2ds.append(pose_model(img[None], np.array(center)[None], np.array(scale)[None]))
             pbar.update_absolute(B + i + 1)
         pose_metas = load_pose_metas_from_kp2ds_seq(np.concatenate(kp2ds, 0), width=W, height=H)
 
