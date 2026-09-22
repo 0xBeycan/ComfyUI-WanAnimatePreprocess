@@ -14,8 +14,9 @@ Per frame, from `pose_data` (keypoints, detections) and the mask:
   subject_switch      box IoU with the previous frame below 0.3 (the detector picked
                       someone / something else)
   multi_person        the detector saw more than one person at 30% or more (warning only)
-  mask_empty          no mask at all, or (on a frame with a reliable box) mask area below
-                      `min_mask_to_box` of the box area
+  mask_empty          no mask, or mask area below `min_mask_to_box` of the box area - only
+                      on a frame whose box the detector and the pose model agree on, since
+                      an empty mask elsewhere is the pose failing, not the mask
   mask_leak           more than `max_mask_outside_box` of the mask lies outside the boxes of
                       the frames around it, grown by 10% (background or a neighbour pulled
                       in); only checked on a frame whose box the detector and the pose model
@@ -30,7 +31,7 @@ Per frame, from `pose_data` (keypoints, detections) and the mask:
                       IoU is above 0.7 (the mask changed, the person did not)
 
 The pose checks and the mask checks are switched on separately. Everything measured is
-reported and plotted; a failed check of an enabled group stops the workflow, since
+always reported and plotted; a failed check of an enabled group stops the workflow, since
 sampling on a wrong mask or pose is wasted. Thresholds are starting points: run with the
 switches off on clips known to be good and bad and read `metrics` before trusting them.
 """
@@ -198,7 +199,9 @@ def apply_checks(rows, t):
             flag("subject_switch", i)
         if m["persons"] > 1:
             flag("multi_person", i)
-        if m["mask_area"] == 0:
+        if m["mask_area"] == 0 and m["box_reliable"]:
+            # an empty mask on a frame the pose pipeline could not describe is a pose
+            # failure, already flagged as no_detection / pose_low_confidence
             flag("mask_empty", i)
         elif m["box_reliable"]:
             if m["mask_to_box"] < t["min_mask_to_box"]:
@@ -217,15 +220,26 @@ def apply_checks(rows, t):
     return flags
 
 
+def longest_run(frames):
+    """The longest run of consecutive frame numbers in a sorted list."""
+    longest = run = 0
+    prev = None
+    for f in frames:
+        run = run + 1 if prev is not None and f == prev + 1 else 1
+        longest = max(longest, run)
+        prev = f
+    return longest
+
+
 def write_report(rows, flags, enabled):
     """The report text and whether the enabled checks all passed."""
-    failed = [name for name in flags if name in enabled and name not in WARNINGS]
     n = len(rows)
+    failed = [name for name in flags if name in enabled and name not in WARNINGS]
     lines = [f"Preprocess guard (beta): {'FAILED' if failed else 'passed'} - "
              f"{len(failed)} check(s) failed on {len({i for name in failed for i in flags[name]})}/{n} frames"]
     for name, frames in flags.items():
         kind = "warning" if name in WARNINGS else ("fail" if name in enabled else "off")
-        line = f"- {name} ({kind}): {len(frames)} frame(s): {_ranges(frames)}"
+        line = f"- {name} ({kind}): {len(frames)} frame(s), longest run {longest_run(frames)}: {_ranges(frames)}"
         if name == "mask_missing_keypoints":
             missed = {}
             for i in frames:

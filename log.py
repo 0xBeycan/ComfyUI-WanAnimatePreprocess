@@ -23,7 +23,13 @@ def step(name, result=None):
     step can fill in; its items are appended to the closing line."""
     info(f"{name} ...")
     t0 = time.perf_counter()
-    yield
-    seconds = time.perf_counter() - t0
-    details = ", ".join(f"{k} {v}" for k, v in (result or {}).items())
-    info(f"{name}: done in {seconds:.1f}s" + (f" ({details})" if details else ""))
+    failed = False
+    try:
+        yield
+    except BaseException:
+        failed = True
+        raise
+    finally:
+        seconds = time.perf_counter() - t0
+        details = ", ".join(f"{k} {v}" for k, v in (result or {}).items())
+        info(f"{name}: {'failed after' if failed else 'done in'} {seconds:.1f}s" + (f" ({details})" if details else ""))

@@ -23,6 +23,11 @@ FACE_SIZE = 512
 # to a person the frame cuts off; it is extended to that edge before it prompts the mask,
 # otherwise the decoder stops at the box and the clothing below it stays unmasked.
 EDGE_SNAP = 0.15
+# The detector's box jumps around between frames - it shrinks to the upper body when the
+# person comes close, and around the blur when they move fast - and both the pose crop and
+# the mask prompt then miss the legs or the feet. The box of each frame is widened to the
+# boxes of its neighbours within this many frames, which the person cannot leave that fast.
+BOX_WINDOW = 4
 
 
 def snap_to_frame(bbox, W, H):
@@ -33,14 +38,29 @@ def snap_to_frame(bbox, W, H):
                      float(bbox[4])])
 
 
+def widen_over_time(bboxes):
+    """Each detected box widened to the boxes of its neighbours within BOX_WINDOW frames.
+    Undetected frames (score -1) are left alone: they are the whole frame already."""
+    out = []
+    for i, bbox in enumerate(bboxes):
+        if bbox[4] <= 0:
+            out.append(bbox)
+            continue
+        near = [b for b in bboxes[max(0, i - BOX_WINDOW):i + BOX_WINDOW + 1] if b[4] > 0]
+        out.append(np.array([min(b[0] for b in near), min(b[1] for b in near),
+                             max(b[2] for b in near), max(b[3] for b in near), bbox[4]]))
+    return out
+
+
 def detect(detector, pose_model, images, face_padding=0, sam3_model=None):
     """Runs the detector and the pose model on every frame of `images` [B, H, W, 3].
 
     Returns (pose_data, face_images, mask): pose_data carries the per-frame pose metas
     (`pose_metas` as AAPoseMeta for drawing, `pose_metas_original` as dicts with the
-    normalised keypoints) and `detections` (the chosen person box as it prompts the mask,
-    extended to frame edges it nearly touches, its score, -1 when nothing was detected and
-    the whole frame was used, and the number of people the detector was fairly sure of);
+    normalised keypoints) and `detections` (the person box as everything downstream sees it:
+    widened to the neighbouring frames' boxes and extended to frame edges it nearly touches,
+    its score, -1 when nothing was detected and the whole frame was used, and the number of
+    people the detector was fairly sure of);
     face_images are 512x512 crops around the face; mask is the SAM3 person mask from the
     checkpoint `sam3_model`, empty when None."""
     B, H, W, C = images.shape
@@ -66,11 +86,12 @@ def detect(detector, pose_model, images, face_padding=0, sam3_model=None):
             pbar.update_absolute(i + 1)
         result["frames without a person"] = sum(1 for b in bboxes if b[-1] <= 0)
         result["frames with several people"] = sum(1 for n in person_counts if n > 1)
-    prompt_boxes = [snap_to_frame(b, W, H) for b in bboxes]
+    # one set of boxes for everything downstream: the pose crop, the mask prompt and the guard
+    boxes = [snap_to_frame(b, W, H) for b in widen_over_time(bboxes)]
 
     kp2ds = []
     with log.step(f"extracting keypoints on {B} frames"):
-        for i, (img, bbox) in enumerate(tqdm(zip(images_np, bboxes), total=B, desc="Extracting keypoints")):
+        for i, (img, bbox) in enumerate(tqdm(zip(images_np, boxes), total=B, desc="Extracting keypoints")):
             center, scale = bbox_from_detector(bbox, POSE_INPUT_RESOLUTION, rescale=POSE_CROP_RESCALE)
             img = crop(img, center, scale, POSE_INPUT_RESOLUTION)[0]
             img_norm = ((img - IMG_NORM_MEAN) / IMG_NORM_STD).transpose(2, 0, 1).astype(np.float32)
@@ -103,15 +124,15 @@ def detect(detector, pose_model, images, face_padding=0, sam3_model=None):
         "pose_metas_original": pose_metas,
         "detections": [
             {"bbox": [float(v) for v in box[:4]], "score": float(box[4]), "persons": int(count)}
-            for box, count in zip(prompt_boxes, person_counts)
+            for box, count in zip(boxes, person_counts)
         ],
     }
     if sam3_model is not None:
         result = {}
         with log.step(f"segmenting the person with {sam3_model} on {B} frames", result):
-            mask = segment_frames(load_sam3(sam3_model), images, prompt_boxes, pose_metas)
+            mask = segment_frames(load_sam3(sam3_model), images, boxes, pose_metas, result=result)
             coverage = mask.mean(dim=(1, 2))
-            result["empty masks"] = int((coverage == 0).sum())
+            result["frames without a mask"] = int((coverage == 0).sum())
             result["mask coverage"] = f"{coverage.min() * 100:.1f}-{coverage.max() * 100:.1f}%"
     else:
         log.info("no SAM3 checkpoint, the mask output is empty")

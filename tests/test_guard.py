@@ -67,6 +67,18 @@ def test_empty_start_is_mask_empty():
     fails_only(flags, "mask_empty", list(range(10)))
 
 
+def test_empty_mask_on_an_undetected_frame_is_not_a_mask_failure():
+    masks, pose_data = clip()
+    masks[7] = 0
+    pose_data["detections"][7] = {"bbox": [0.0, 0.0, float(W), float(H)], "score": -1.0, "persons": 0}
+    pts = pose_data["pose_metas_original"][7]["keypoints_body"].copy()
+    pts[:, 2] = 0.05
+    pose_data["pose_metas_original"][7]["keypoints_body"] = pts
+    report, passed, metrics, _ = guard.run_guard(masks, pose_data, THRESHOLDS, False, True)
+    flags = json.loads(metrics)["flags"]
+    assert passed and "mask_empty" not in flags, report
+
+
 def test_mask_dying_mid_clip():
     masks, pose_data = clip()
     masks[25:] = 0

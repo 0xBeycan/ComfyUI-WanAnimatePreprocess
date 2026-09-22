@@ -9,16 +9,10 @@ from .models.onnx_models import ViTPose, Yolo
 from .models.sam3 import DEFAULT_SAM3
 from .preprocess import detect, draw
 
+# Models live in ComfyUI's own models/detection folder; the package only resolves full
+# paths there (get_full_path does not filter by extension), so nothing else is needed.
 _detection_path = os.path.join(folder_paths.models_dir, "detection")
 folder_paths.add_model_folder_path("detection", _detection_path)
-# Newer ComfyUI registers "detection" itself with the shared supported_pt_extensions set,
-# which has no ".onnx", so every .onnx would be filtered out. Give the folder its own
-# extension set (mutating the shared one would list .onnx files in every model folder)
-# and drop the list cached under the old filter. An empty set means no filter at all.
-_paths, _exts = folder_paths.folder_names_and_paths["detection"]
-if _exts and ".onnx" not in _exts:
-    folder_paths.folder_names_and_paths["detection"] = (_paths, set(_exts) | {".onnx"})
-    getattr(folder_paths, "filename_list_cache", {}).pop("detection", None)
 
 # The models the node runs, fetched on first use when they are not in models/detection.
 # Each entry lists every file the model needs.
@@ -116,7 +110,8 @@ class WanAnimatePreprocessGuard:
             "min_mask_to_box": min_mask_to_box, "max_mask_outside_box": max_mask_outside_box,
             "min_keypoint_recall": min_keypoint_recall, "min_mask_iou": min_mask_iou,
         }
-        with log.step(f"checking {mask.shape[0]} frames (pose guard {'on' if pose_guard else 'off'}, mask guard {'on' if mask_guard else 'off'})"):
+        frames = mask.shape[0] if mask.dim() == 3 else 1
+        with log.step(f"checking {frames} frames (pose guard {'on' if pose_guard else 'off'}, mask guard {'on' if mask_guard else 'off'})"):
             report, passed, metrics, timeline = run_guard(mask, pose_data, thresholds, pose_guard, mask_guard)
         log.info(report.replace("\n", "\n    "))
         if not passed:

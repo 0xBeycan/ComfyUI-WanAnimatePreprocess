@@ -12,6 +12,8 @@ The model is ComfyUI's own SAM3 implementation loaded from `models/checkpoints`
 (`sam3.1_multiplex_fp16.safetensors`, fetched on first use when missing), so it is loaded
 and offloaded by ComfyUI like every other model.
 """
+import contextlib
+import io
 import os
 
 import cv2
@@ -34,7 +36,7 @@ SAM3_SIZE = 1008
 # Body keypoints used as positive points: nose, neck, both shoulders, both hips and both
 # ankles in the body layout (see guard.BODY_NAMES).
 PROMPT_KEYPOINTS = (0, 1, 2, 5, 8, 11, 10, 13)
-NOSE, NECK, R_SHOULDER, L_SHOULDER, R_HIP, L_HIP = 0, 1, 2, 5, 8, 11
+R_SHOULDER, L_SHOULDER, R_HIP, L_HIP = 2, 5, 8, 11
 # Keypoints sit on joints, so the body between them carries no positive evidence and the
 # decoder drops parts of it: a close-up lost the lower half of a jacket, and a dancer's
 # legs dropped out of the mask on the frames they moved fastest, while the knees the pose
@@ -67,6 +69,10 @@ MAX_PROPAGATE = 3 * RESEED_INTERVAL
 MIN_TRACKED_RECALL = 0.9
 # A binary mask handed to the tracker as logits: +/- this value.
 MASK_LOGIT_SCALE = 10.0
+# Where the mask logits are cut. Slightly below zero because the boundary is soft exactly
+# where the thin parts are - loose hair, fingers, the edge of a foot - and they were left
+# a few pixels outside the mask, which the block mask downstream then makes obvious.
+MASK_THRESHOLD = -1.0
 # Islands smaller than this fraction of the largest region are decoder noise (specks in
 # shadows and edges), not the person; downstream block masks would blow them up.
 MIN_ISLAND_FRACTION = 0.01
@@ -97,9 +103,10 @@ def fill_holes(mask):
     return out
 
 
-def body_points(kps, threshold):
+def body_points(kps, threshold, aspect=1.0):
     """Points on the body between the joints, in normalised coordinates: down the torso and
-    along every limb whose two ends the pose model is sure of."""
+    along every limb whose two ends the pose model is sure of. `aspect` is W / H, needed
+    where an x distance has to be stepped along y."""
     points = []
     if kps[R_SHOULDER][2] > threshold and kps[L_SHOULDER][2] > threshold:
         shoulder = ((kps[R_SHOULDER][0] + kps[L_SHOULDER][0]) / 2, (kps[R_SHOULDER][1] + kps[L_SHOULDER][1]) / 2)
@@ -108,8 +115,10 @@ def body_points(kps, threshold):
             hip = (sum(h[0] for h in hips) / len(hips), sum(h[1] for h in hips) / len(hips))
             points += [(shoulder[0] + t * (hip[0] - shoulder[0]), shoulder[1] + t * (hip[1] - shoulder[1])) for t in TORSO_FRACTIONS]
         else:
-            # the hips are out of frame: step down from the shoulders by their own width
-            span = abs(kps[R_SHOULDER][0] - kps[L_SHOULDER][0]) or 0.15
+            # the hips are out of frame: step down from the shoulders by their own width, in
+            # frame units - the coordinates are normalised per axis, so the x span has to be
+            # scaled by the aspect ratio before it can be added to y
+            span = (abs(kps[R_SHOULDER][0] - kps[L_SHOULDER][0]) or 0.15) * aspect
             points += [(shoulder[0], min(shoulder[1] + t * span, 0.99)) for t in (1.0, 2.0)]
     for a, b in LIMBS:
         if kps[a][2] > threshold and kps[b][2] > threshold:
@@ -154,13 +163,13 @@ def has_fast_path(sam3):
     return sam3._wanpre_fast_path
 
 
-def decode(sam3, frame, point_inputs, box_inputs, refine, mask_prior=None):
-    """Mask logits for one 1008x1008 frame from box / point prompts and an optional mask
-    prior, with an optional refinement pass that feeds the first mask back to the decoder.
-    This is SAM3Model.forward_segment with the image encoder run once: its features do not
-    depend on the prompt, so the later passes only run the SAM heads."""
+def decode(sam3, frame, point_inputs, box_inputs, refine):
+    """Mask logits for one 1008x1008 frame from box and point prompts, with an optional
+    refinement pass that feeds the first mask back to the decoder. This is
+    SAM3Model.forward_segment with the image encoder run once: its features do not depend on
+    the prompt, so the refinement pass only runs the SAM heads."""
     if not has_fast_path(sam3):
-        logits = sam3.forward_segment(frame, point_inputs=point_inputs, box_inputs=box_inputs, mask_inputs=mask_prior)
+        logits = sam3.forward_segment(frame, point_inputs=point_inputs, box_inputs=box_inputs)
         return sam3.forward_segment(frame, mask_inputs=logits) if refine else logits
     bb = sam3.detector.backbone["vision_backbone"]
     if bb.multiplex:
@@ -180,21 +189,13 @@ def decode(sam3, frame, point_inputs, box_inputs, refine, mask_prior=None):
         backbone_feat = (flat + cast_to_input(no_mem, flat)).view(B, H, W, C).permute(0, 3, 1, 2)
     num_pts = 0 if point_inputs is None else point_inputs["point_labels"].size(1)
     _, logits, _, _ = tracker._forward_sam_heads(
-        backbone_features=backbone_feat, point_inputs=point_inputs, mask_inputs=mask_prior, box_inputs=box_inputs,
-        high_res_features=high_res, multimask_output=(0 < num_pts <= 1 and mask_prior is None))
+        backbone_features=backbone_feat, point_inputs=point_inputs, mask_inputs=None, box_inputs=box_inputs,
+        high_res_features=high_res, multimask_output=(0 < num_pts <= 1))
     if refine:
         _, logits, _, _ = tracker._forward_sam_heads(
             backbone_features=backbone_feat, point_inputs=None, mask_inputs=logits, box_inputs=None,
             high_res_features=high_res, multimask_output=False)
     return logits
-
-
-def box_iou(a, b):
-    x1, y1 = max(a[0], b[0]), max(a[1], b[1])
-    x2, y2 = min(a[2], b[2]), min(a[3], b[3])
-    inter = max(0.0, x2 - x1) * max(0.0, y2 - y1)
-    union = (a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - inter
-    return inter / union if union > 0 else 0.0
 
 
 def prompt_for(frame_index, bboxes, pose_metas, W, H, device, dtype):
@@ -207,7 +208,7 @@ def prompt_for(frame_index, bboxes, pose_metas, W, H, device, dtype):
         box_inputs = torch.tensor([[[bbox[0] * sx, bbox[1] * sy], [bbox[2] * sx, bbox[3] * sy]]], device=device, dtype=dtype)
     kps = pose_metas[frame_index]["keypoints_body"]
     points = [(kps[k][0], kps[k][1]) for k in PROMPT_KEYPOINTS if kps[k][2] > MIN_KEYPOINT_CONF]
-    points += body_points(kps, MIN_KEYPOINT_CONF)
+    points += body_points(kps, MIN_KEYPOINT_CONF, W / H)
     point_inputs = None
     if points:
         point_inputs = {"point_coords": torch.tensor([[(x * SAM3_SIZE, y * SAM3_SIZE) for x, y in points]], device=device, dtype=dtype),
@@ -245,7 +246,7 @@ def clean(mask):
     return drop_islands(fill_holes(mask.astype(np.uint8)))
 
 
-def segment_frames(model, images, bboxes, pose_metas, refine=True, temporal=True):
+def segment_frames(model, images, bboxes, pose_metas, refine=True, temporal=True, result=None):
     """[N, H, W] float masks of the detected person in `images` [N, H, W, 3].
 
     `bboxes[i]` is frame i's detector box as (x1, y1, x2, y2, score); a score of -1 means
@@ -257,7 +258,8 @@ def segment_frames(model, images, bboxes, pose_metas, refine=True, temporal=True
     through frames the pose model loses to motion blur. The tracker is re-seeded from a
     fresh prompt every RESEED_INTERVAL frames - but only on a frame that is an anchor, and
     immediately when the propagated mask stops covering the keypoints. With `temporal` off,
-    every frame is prompted on its own, without the tracker."""
+    every frame is prompted on its own, without the tracker. `result`, if given, is filled
+    with what happened for the log."""
     N, H, W, _ = images.shape
     mm.load_model_gpu(model)
     device, dtype = mm.get_torch_device(), model.model.get_dtype()
@@ -265,27 +267,42 @@ def segment_frames(model, images, bboxes, pose_metas, refine=True, temporal=True
     frames_chw = images[..., :3].movedim(-1, 1)
     masks = torch.zeros(N, H, W)
     pbar = ProgressBar(N)
-    seeds = forced = 0
+    counts = {"prompted": 0, "propagated": 0, "re-seeded early": 0, "no prompt": 0, "empty prompt": 0}
     i = 0
+    seed_frame, seed_count = -1, 0
     while i < N:
         box_inputs, point_inputs = prompt_for(i, bboxes, pose_metas, W, H, device, dtype)
-        if box_inputs is None and point_inputs is None:   # nothing to describe the person with
-            pbar.update(1)
-            i += 1
-            continue
-        frame = common_upscale(frames_chw[i:i + 1], SAM3_SIZE, SAM3_SIZE, "bilinear", crop="disabled").to(device, dtype)
-        with torch.inference_mode():
-            logits = decode(sam3, frame, point_inputs, box_inputs, refine)
-            seed = (F.interpolate(logits.float(), size=(H, W), mode="bilinear", align_corners=False)[0, 0] > 0).cpu().numpy()
-        masks[i] = torch.from_numpy(clean(seed)).float()
-        seeds += 1
-        seed_frame, seed_count = i, confident_count(pose_metas[i])
-        pbar.update(1)
-        i += 1
+        if box_inputs is None or point_inputs is None:
+            # nothing to describe the person with: carry the track on if there is one, else
+            # leave this frame without a mask (the guard reports it as pose, not mask)
+            counts["no prompt"] += 1
+            if not (temporal and i > 0 and masks[i - 1].any()):
+                pbar.update(1)
+                i += 1
+                continue
+        else:
+            frame = common_upscale(frames_chw[i:i + 1], SAM3_SIZE, SAM3_SIZE, "bilinear", crop="disabled").to(device, dtype)
+            with torch.inference_mode():
+                logits = decode(sam3, frame, point_inputs, box_inputs, refine)
+                seed = (F.interpolate(logits.float(), size=(H, W), mode="bilinear",
+                                      align_corners=False)[0, 0] > MASK_THRESHOLD).cpu().numpy()
+            if seed.any():
+                masks[i] = torch.from_numpy(clean(seed)).float()
+                counts["prompted"] += 1
+                seed_frame, seed_count = i, confident_count(pose_metas[i])
+                pbar.update(1)
+                i += 1
+            else:
+                # the decoder found nothing here; propagating from an empty mask is wasted work
+                counts["empty prompt"] += 1
+                if not (temporal and i > 0 and masks[i - 1].any()):
+                    pbar.update(1)
+                    i += 1
+                    continue
         if not temporal or i >= N:
             continue
-        # propagate from the seeded frame; accept frames while the mask still covers the
-        # keypoints, and stop at the first anchor once the interval is up
+        # propagate from the last frame that has a mask; accept frames while the mask still
+        # covers the keypoints, and stop at the first anchor once the interval is up
         while i < N:
             end = min(i + RESEED_INTERVAL, N)
             with torch.inference_mode():
@@ -295,39 +312,50 @@ def segment_frames(model, images, bboxes, pose_metas, refine=True, temporal=True
             stop = False
             for k, mask in enumerate(tracked, start=i):
                 if keypoint_recall(mask, pose_metas[k]["keypoints_body"], W, H) < MIN_TRACKED_RECALL:
+                    counts["re-seeded early"] += 1
                     stop = True
                     break
                 masks[k] = torch.from_numpy(clean(mask)).float()
+                counts["propagated"] += 1
                 pbar.update(1)
                 i = k + 1
-                if i - seed_frame >= RESEED_INTERVAL and (is_anchor(i, bboxes, pose_metas, seed_count) if i < N else True):
+                since_seed = i - seed_frame if seed_frame >= 0 else RESEED_INTERVAL
+                if since_seed >= RESEED_INTERVAL and i < N and is_anchor(i, bboxes, pose_metas, seed_count):
                     stop = True
                     break
-                if i - seed_frame >= MAX_PROPAGATE:
-                    forced += 1
+                if since_seed >= MAX_PROPAGATE:
                     stop = True
                     break
             if stop:
                 break
-    log.info(f"tracked {N} frames from {seeds} prompted frame(s)" + (f", {forced} of them without a confident pose" if forced else ""))
+    if result is not None:
+        result.update({k: v for k, v in counts.items() if v})
+    log.info("segmented " + ", ".join(f"{v} frame(s) {k}" for k, v in counts.items() if v))
     return masks
 
 
 def propagate(sam3, frames_chw, first_mask, device, dtype, H, W):
     """Masks for frames_chw[1:], propagated by the tracker's memory from `first_mask` on
-    frames_chw[0]. Returns [] when this ComfyUI's tracker cannot be driven this way."""
+    frames_chw[0]. Returns [] when this ComfyUI's tracker cannot be driven this way, which
+    is decided on the first attempt and then remembered, so a version that does not support
+    it costs one warning instead of one per frame."""
+    if getattr(sam3, "_wanpre_no_propagation", False):
+        return []
     initial = (first_mask[None, None].to(device, dtype) * 2 - 1) * MASK_LOGIT_SCALE
     try:
-        with torch.inference_mode():
+        with torch.inference_mode(), contextlib.redirect_stderr(io.StringIO()):
+            # the core tracker prints a progress bar per call, which is one blank line per
+            # segment in ComfyUI's log; our own step lines already report the progress
             result = sam3.forward_video(images=frames_chw, initial_masks=initial, text_prompts=None,
                                         max_objects=1, detect_interval=1, target_device=device, target_dtype=dtype)
-        packed = result["packed_masks"]
-        if packed is None:
-            return []
-        from comfy.ldm.sam3.tracker import unpack_masks
-        tracked = unpack_masks(packed[:, 0]).float()[:, None]
-        tracked = F.interpolate(tracked, size=(H, W), mode="bilinear", align_corners=False)[:, 0] > 0.5
-        return [m.cpu().numpy() for m in tracked[1:]]
-    except (AttributeError, KeyError, TypeError, ValueError) as e:
+            packed = result["packed_masks"]
+            if packed is None:
+                return []
+            from comfy.ldm.sam3.tracker import unpack_masks
+            tracked = unpack_masks(packed[:, 0]).float()[:, None]
+            tracked = F.interpolate(tracked, size=(H, W), mode="bilinear", align_corners=False)[:, 0] > 0.5
+            return [m.cpu().numpy() for m in tracked[1:]]
+    except (AttributeError, ImportError, KeyError, TypeError, ValueError) as e:
         log.warning(f"this ComfyUI's SAM3 tracker cannot be propagated ({e}); prompting every frame instead")
+        sam3._wanpre_no_propagation = True
         return []

@@ -1,7 +1,7 @@
 [project]
 name = "ComfyUI-WanAnimatePreprocess"
 description = "Wan Animate preprocess in one node: pose, face crops, person mask and pose images, with a guard"
-version = "1.0.4"
+version = "2.0.0"
 license = {file = "LICENSE"}
 dependencies = ["opencv-python", "onnx"]
 
@@ -10,6 +10,6 @@ Repository = "https://github.com/0xBeycan/ComfyUI-WanAnimatePreprocess"
 #  Used by Comfy Registry https://comfyregistry.org
 
 [tool.comfy]
-PublisherId = "kijai"
+PublisherId = "0xbeycan"
 DisplayName = "ComfyUI-WanAnimatePreprocess"
 Icon = ""
