@@ -6,7 +6,7 @@ license = {file = "LICENSE"}
 dependencies = ["opencv-python", "onnx"]
 
 [project.urls]
-Repository = "https://github.com/kijai/ComfyUI-WanAnimatePreprocess"
+Repository = "https://github.com/0xBeycan/ComfyUI-WanAnimatePreprocess"
 #  Used by Comfy Registry https://comfyregistry.org
 
 [tool.comfy]

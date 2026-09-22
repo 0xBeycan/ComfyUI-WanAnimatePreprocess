@@ -11,21 +11,14 @@ from .preprocess import detect, draw
 
 _detection_path = os.path.join(folder_paths.models_dir, "detection")
 folder_paths.add_model_folder_path("detection", _detection_path)
-# Newer ComfyUI registers "detection" itself with supported_pt_extensions, which has no
-# ".onnx", so add_model_folder_path only appends the path and every .onnx gets filtered out.
-# An empty set means no filter is applied at all, leave that case alone.
-_detection_exts = folder_paths.folder_names_and_paths["detection"][1]
-if _detection_exts and ".onnx" not in _detection_exts:
-    _detection_exts.add(".onnx")
-    # Widening the set does not invalidate anything that already cached the filtered
-    # list, and INPUT_TYPES would keep serving the stale .bin-only result. Both cache
-    # layers are internals, so tolerate them being renamed or dropped upstream.
-    _list_cache = getattr(folder_paths, "filename_list_cache", None)
-    if isinstance(_list_cache, dict):
-        _list_cache.pop("detection", None)
-    _cache_helper = getattr(folder_paths, "cache_helper", None)
-    if hasattr(_cache_helper, "clear"):
-        _cache_helper.clear()
+# Newer ComfyUI registers "detection" itself with the shared supported_pt_extensions set,
+# which has no ".onnx", so every .onnx would be filtered out. Give the folder its own
+# extension set (mutating the shared one would list .onnx files in every model folder)
+# and drop the list cached under the old filter. An empty set means no filter at all.
+_paths, _exts = folder_paths.folder_names_and_paths["detection"]
+if _exts and ".onnx" not in _exts:
+    folder_paths.folder_names_and_paths["detection"] = (_paths, set(_exts) | {".onnx"})
+    folder_paths.filename_list_cache.pop("detection", None)
 
 # The default models, fetched on first use when they are not in models/detection. Each
 # entry lists every file the model needs.
@@ -85,10 +78,8 @@ class WanAnimatePreprocess:
                 "vitpose_model": (detection_model_choices(), {"default": DEFAULT_VITPOSE, "tooltip": f"Loaded from the 'ComfyUI/models/detection' folder; {DEFAULT_VITPOSE} is downloaded on first use when missing"}),
                 "yolo_model": (detection_model_choices(), {"default": DEFAULT_YOLO, "tooltip": f"Loaded from the 'ComfyUI/models/detection' folder; {DEFAULT_YOLO} is downloaded on first use when missing"}),
                 "sam3_model": (sam3_choices(), {"default": DEFAULT_SAM3, "tooltip": "SAM 3 / 3.1 checkpoint from 'ComfyUI/models/checkpoints' (sam3.1_multiplex_fp16.safetensors is downloaded on first use when missing). Every frame's person is segmented from its detected bbox and body keypoints, no text prompt and no tracking; 'none' leaves the mask output empty"}),
-                "width": ("INT", {"default": 832, "min": 64, "max": 2048, "step": 1, "tooltip": "Width of the generation"}),
-                "height": ("INT", {"default": 480, "min": 64, "max": 2048, "step": 1, "tooltip": "Height of the generation"}),
-                "body_stick_width": ("INT", {"default": -1, "min": -1, "max": 20, "step": 1, "tooltip": "Width of the body sticks. Set to 0 to disable body drawing, -1 for auto"}),
-                "hand_stick_width": ("INT", {"default": -1, "min": -1, "max": 20, "step": 1, "tooltip": "Width of the hand sticks. Set to 0 to disable hand drawing, -1 for auto"}),
+                "body_stick_width": ("INT", {"default": -1, "min": -1, "max": 20, "step": 1, "tooltip": "Width of the body sticks in the pose images; 0 leaves the body out, -1 picks it from the frame size"}),
+                "hand_stick_width": ("INT", {"default": -1, "min": -1, "max": 20, "step": 1, "tooltip": "Width of the hand sticks in the pose images; 0 leaves the hands out, -1 picks it from the frame size"}),
                 "draw_head": ("BOOLEAN", {"default": True, "tooltip": "Whether to draw head keypoints"}),
                 "face_padding": ("INT", {"default": 0, "min": 0, "max": 512, "step": 1, "tooltip": "When > 0, the detected face images are padded and resized to 512x512"}),
             },
@@ -98,13 +89,12 @@ class WanAnimatePreprocess:
     RETURN_NAMES = ("pose_images", "face_images", "mask", "pose_data")
     FUNCTION = "process"
     CATEGORY = "WanAnimate"
-    DESCRIPTION = "The whole WanAnimate preprocess in one node: loads the selected ViTPose, YOLO and SAM3 models (downloading the defaults when missing), detects the person's pose and face on every frame, segments the person from its bbox and keypoints, and draws the pose images."
+    DESCRIPTION = "The whole WanAnimate preprocess in one node: loads the selected ViTPose, YOLO and SAM3 models (downloading the defaults when missing), detects the person's pose and face on every frame, segments the person from its bbox and keypoints, and draws the pose images at the frame size. Feed it frames already at the generation size."
 
-    def process(self, images, vitpose_model, yolo_model, sam3_model, width, height, body_stick_width, hand_stick_width,
-                draw_head, face_padding):
+    def process(self, images, vitpose_model, yolo_model, sam3_model, body_stick_width, hand_stick_width, draw_head, face_padding):
         pose_model, detector = load_detection_models(vitpose_model, yolo_model)
         pose_data, face_images, mask = detect(detector, pose_model, images, face_padding=face_padding, sam3_model=sam3_model)
-        pose_images = draw(pose_data, width, height, body_stick_width, hand_stick_width, draw_head)
+        pose_images = draw(pose_data, body_stick_width, hand_stick_width, draw_head)
         return (pose_images, face_images, mask, pose_data)
 
 

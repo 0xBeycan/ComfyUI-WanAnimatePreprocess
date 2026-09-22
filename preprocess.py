@@ -1,5 +1,7 @@
 """The Wan Animate preprocess, frame by frame: person box (YOLO), body / hand / face
 keypoints (ViTPose), face crops, the person mask (SAM3) and the drawn pose images."""
+import copy
+
 import cv2
 import numpy as np
 import torch
@@ -11,7 +13,7 @@ from .models.onnx_models import load_models
 from .models.sam3 import load_sam3, segment_frames
 from .pose_utils.human_visualization import draw_aapose_by_meta_new
 from .pose_utils.pose2d_utils import AAPoseMeta, bbox_from_detector, crop, load_pose_metas_from_kp2ds_seq
-from .utils import get_face_bboxes, padding_resize
+from .utils import get_face_bboxes
 
 IMG_NORM_MEAN = np.array([0.485, 0.456, 0.406])
 IMG_NORM_STD = np.array([0.229, 0.224, 0.225])
@@ -53,7 +55,9 @@ def detect(detector, pose_model, images, face_padding=0, sam3_model="none"):
     with log.step(f"extracting keypoints on {B} frames"):
         for i, (img, bbox) in enumerate(tqdm(zip(images_np, bboxes), total=B, desc="Extracting keypoints")):
             if bbox[-1] <= 0 or (bbox[2] - bbox[0]) < 10 or (bbox[3] - bbox[1]) < 10:
-                bbox = np.array([0, 0, W, H])
+                # nothing usable detected: the pose, the mask prompt and the guard all see the
+                # whole frame as the box, marked undetected
+                bbox = bboxes[i] = np.array([0.0, 0.0, W, H, -1.0])
             center, scale = bbox_from_detector(bbox, POSE_INPUT_RESOLUTION, rescale=POSE_CROP_RESCALE)
             img = crop(img, center, scale, POSE_INPUT_RESOLUTION)[0]
             img_norm = ((img - IMG_NORM_MEAN) / IMG_NORM_STD).transpose(2, 0, 1).astype(np.float32)
@@ -102,16 +106,21 @@ def detect(detector, pose_model, images, face_padding=0, sam3_model="none"):
     return pose_data, torch.from_numpy(np.stack(face_images, 0)), mask
 
 
-def draw(pose_data, width, height, body_stick_width=-1, hand_stick_width=-1, draw_head=True):
-    """The pose images [B, height, width, 3] drawn from pose_data."""
+def draw(pose_data, body_stick_width=-1, hand_stick_width=-1, draw_head=True):
+    """The pose images [B, H, W, 3] drawn from pose_data at the size of the frames the pose
+    was found on, so they line up with the frames and the mask. A stick width of 0 leaves
+    that part out."""
     pose_metas = pose_data["pose_metas"]
     pbar = ProgressBar(len(pose_metas))
     pose_images = []
-    with log.step(f"drawing {len(pose_metas)} pose images at {width}x{height}"):
+    with log.step(f"drawing {len(pose_metas)} pose images"):
         for i, meta in enumerate(tqdm(pose_metas, desc="Drawing pose images")):
-            canvas = np.zeros((height, width, 3), dtype=np.uint8)
+            if body_stick_width == 0:
+                meta = copy.copy(meta)
+                meta.kps_body_p = np.zeros_like(meta.kps_body_p)
+            canvas = np.zeros((meta.height, meta.width, 3), dtype=np.uint8)
             image = draw_aapose_by_meta_new(canvas, meta, draw_hand=hand_stick_width != 0, draw_head=draw_head,
                                             body_stick_width=body_stick_width, hand_stick_width=hand_stick_width)
-            pose_images.append(padding_resize(image, height, width))
+            pose_images.append(image)
             pbar.update_absolute(i + 1)
     return torch.from_numpy(np.stack(pose_images, 0)).float() / 255.0

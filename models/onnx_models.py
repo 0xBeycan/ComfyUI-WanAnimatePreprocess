@@ -22,6 +22,10 @@ class OnnxModel:
 
     def __init__(self, checkpoint):
         graph = OnnxGraph(checkpoint)
+        if len(graph.inputs) != 1 or len(graph.outputs) != 1:
+            raise ValueError(f"{checkpoint} has {len(graph.inputs)} inputs and {len(graph.outputs)} outputs; "
+                             "the detection models take one image and return one tensor")
+        self.input_dtype = graph.input_dtypes[graph.inputs[0]]
         self.net = (build_vitpose(graph) or GraphModule(graph)).eval()
         self.patcher = ModelPatcher(self.net, load_device=mm.get_torch_device(), offload_device=mm.unet_offload_device())
 
@@ -29,8 +33,7 @@ class OnnxModel:
         return self.forward(*args, **kwargs)
 
     def run(self, x):
-        dtype = next(self.net.parameters()).dtype  # fp16 exports take fp16 input
-        x = torch.from_numpy(np.ascontiguousarray(x)).to(self.patcher.load_device, dtype)
+        x = torch.from_numpy(np.ascontiguousarray(x)).to(self.patcher.load_device, self.input_dtype)
         with torch.inference_mode():
             out = self.net(x)
         return out.float().cpu().numpy()

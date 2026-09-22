@@ -13,11 +13,13 @@ models take part in ComfyUI's memory management like any other model.
 ### WanAnimate Preprocess
 
 Inputs: the frames (`images`), the model choices (`vitpose_model`, `yolo_model`,
-`sam3_model`), the generation size (`width`, `height`) and the drawing options
-(`body_stick_width`, `hand_stick_width`, `draw_head`, `face_padding`).
+`sam3_model`) and the drawing options (`body_stick_width`, `hand_stick_width`,
+`draw_head`, `face_padding`).
 
-Outputs: `pose_images` (the drawn pose at the generation size), `face_images` (512x512
-crops around the face), `mask` (the person, every frame) and `pose_data` (for the guard).
+Outputs: `pose_images` (the drawn pose, at the frame size so it lines up with the frames
+and the mask - feed the node frames already at the generation size), `face_images`
+(512x512 crops around the face), `mask` (the person, every frame) and `pose_data` (for
+the guard).
 
 Per frame: YOLO finds the person, ViTPose gives body / hand / face keypoints from that box,
 the face is cropped around the face keypoints, and SAM3 segments the person from the box

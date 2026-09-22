@@ -16,7 +16,7 @@ def download(url, path):
     part = path + ".part"
     try:
         request = urllib.request.Request(url, headers={"User-Agent": "ComfyUI-WanAnimatePreprocess"})
-        with urllib.request.urlopen(request) as response, open(part, "wb") as out:
+        with urllib.request.urlopen(request, timeout=60) as response, open(part, "wb") as out:
             total = int(response.headers.get("Content-Length") or 0)
             comfy_pbar = ProgressBar(total) if total else None
             with tqdm(total=total or None, unit="B", unit_scale=True, desc=name) as pbar:
@@ -26,5 +26,7 @@ def download(url, path):
                     if comfy_pbar is not None:
                         comfy_pbar.update_absolute(pbar.n)
     except Exception as e:
+        if os.path.exists(part):
+            os.remove(part)
         raise RuntimeError(f"Could not download {name} from {url} ({e}). Download it by hand to {path}") from e
     os.replace(part, path)

@@ -264,12 +264,16 @@ def timeline_image(rows, flags):
 
 def run_guard(mask, pose_data, thresholds, pose_guard, mask_guard):
     masks = (mask.cpu().numpy() > 0.5)
-    pose_metas = pose_data["pose_metas_original"]
-    detections = pose_data.get("detections")
-    if detections is None:
-        raise ValueError("pose_data has no per-frame detections; it must come from WanAnimate Preprocess")
-    if len(pose_metas) != masks.shape[0] or len(detections) != masks.shape[0]:
-        raise ValueError(f"mask has {masks.shape[0]} frames, pose_data {len(pose_metas)}; connect the outputs of the same node")
+    pose_metas = pose_data.get("pose_metas_original") if isinstance(pose_data, dict) else None
+    detections = pose_data.get("detections") if isinstance(pose_data, dict) else None
+    if pose_metas is None or detections is None:
+        raise ValueError("pose_data has no per-frame keypoints and detections; it must come from WanAnimate Preprocess")
+    N, H, W = masks.shape
+    if len(pose_metas) != N or len(detections) != N:
+        raise ValueError(f"mask has {N} frames, pose_data {len(pose_metas)}; connect the outputs of the same node")
+    if pose_metas and (pose_metas[0]["height"], pose_metas[0]["width"]) != (H, W):
+        raise ValueError(f"mask is {W}x{H} but the pose was found on {pose_metas[0]['width']}x{pose_metas[0]['height']} "
+                         "frames; connect the mask straight from WanAnimate Preprocess, before any resize")
     rows = frame_metrics(masks, pose_metas, detections, thresholds["min_keypoint_conf"])
     flags = apply_checks(rows, thresholds)
     enabled = set(POSE_CHECKS if pose_guard else ()) | set(MASK_CHECKS if mask_guard else ())

@@ -18,6 +18,7 @@ import torch.nn.functional as F
 import comfy.sd
 import folder_paths
 from comfy import model_management as mm
+from comfy.ops import cast_to_input
 from comfy.utils import ProgressBar, common_upscale
 
 from .. import log
@@ -27,8 +28,8 @@ DEFAULT_SAM3 = "sam3.1_multiplex_fp16.safetensors"
 DEFAULT_SAM3_URL = "https://huggingface.co/Comfy-Org/sam3.1/resolve/main/checkpoints/sam3.1_multiplex_fp16.safetensors"
 
 SAM3_SIZE = 1008
-# Body keypoints used as positive points (nose, neck, shoulders, hips, knees in the
-# node's body layout) - the same set the node exports as key_frame_body_points.
+# Body keypoints used as positive points: nose, neck, both shoulders, both hips and both
+# ankles in the body layout (see guard.BODY_NAMES).
 PROMPT_KEYPOINTS = (0, 1, 2, 5, 8, 11, 10, 13)
 MIN_KEYPOINT_CONF = 0.3
 # Islands smaller than this fraction of the largest region are decoder noise (specks in
@@ -74,6 +75,43 @@ def load_sam3(name):
     return model
 
 
+def decode(sam3, frame, point_inputs, box_inputs, refine):
+    """Mask logits for one 1008x1008 frame from box / point prompts, with an optional
+    refinement pass that feeds the first mask back to the decoder. This is SAM3Model.
+    forward_segment with the image encoder run once: its features do not depend on the
+    prompt, so the second pass only runs the SAM heads instead of the whole network."""
+    try:
+        bb = sam3.detector.backbone["vision_backbone"]
+        if bb.multiplex:
+            _, _, feats, _ = bb(frame, tracker_mode="interactive")
+        else:
+            _, _, feats, _ = bb(frame, need_tracker=True)
+            if sam3.detector.scalp > 0:
+                feats = feats[:-sam3.detector.scalp]
+        high_res, backbone_feat = list(feats[:-1]), feats[-1]
+        tracker = sam3.tracker
+        no_mem = getattr(tracker, "interactivity_no_mem_embed", None)
+        if no_mem is None:
+            no_mem = getattr(tracker, "no_mem_embed", None)
+        if no_mem is not None:
+            B, C, H, W = backbone_feat.shape
+            flat = backbone_feat.flatten(2).permute(0, 2, 1)
+            backbone_feat = (flat + cast_to_input(no_mem, flat)).view(B, H, W, C).permute(0, 3, 1, 2)
+        num_pts = 0 if point_inputs is None else point_inputs["point_labels"].size(1)
+        _, logits, _, _ = tracker._forward_sam_heads(
+            backbone_features=backbone_feat, point_inputs=point_inputs, mask_inputs=None, box_inputs=box_inputs,
+            high_res_features=high_res, multimask_output=(0 < num_pts <= 1))
+        if refine:
+            _, logits, _, _ = tracker._forward_sam_heads(
+                backbone_features=backbone_feat, point_inputs=None, mask_inputs=logits, box_inputs=None,
+                high_res_features=high_res, multimask_output=False)
+        return logits
+    except (AttributeError, KeyError, TypeError):
+        # the internals above moved in this ComfyUI version: take the public path, one encoder pass per call
+        logits = sam3.forward_segment(frame, point_inputs=point_inputs, box_inputs=box_inputs)
+        return sam3.forward_segment(frame, mask_inputs=logits) if refine else logits
+
+
 def segment_frames(model, images, bboxes, pose_metas, refine=True):
     """[N, H, W] float masks of the detected person in `images` [N, H, W, 3].
 
@@ -104,9 +142,7 @@ def segment_frames(model, images, bboxes, pose_metas, refine=True):
         frame = common_upscale(images[i:i + 1, ..., :3].movedim(-1, 1), SAM3_SIZE, SAM3_SIZE, "bilinear", crop="disabled")
         frame = frame.to(device=device, dtype=dtype)
         with torch.inference_mode():
-            logits = sam3.forward_segment(frame, point_inputs=point_inputs, box_inputs=box_inputs)
-            if refine:
-                logits = sam3.forward_segment(frame, mask_inputs=logits)
+            logits = decode(sam3, frame, point_inputs, box_inputs, refine)
             mask = F.interpolate(logits.float(), size=(H, W), mode="bilinear", align_corners=False)[0, 0]
         masks[i] = torch.from_numpy(drop_islands((mask > 0).cpu().numpy().astype(np.uint8))).float()
         pbar.update(1)

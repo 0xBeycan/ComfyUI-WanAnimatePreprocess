@@ -1,37 +1,5 @@
 # Copyright 2024-2025 The Alibaba Wan Team Authors. All rights reserved.
-import cv2
 import numpy as np
-
-
-def padding_resize(img_ori, height=512, width=512, padding_color=(0, 0, 0), interpolation=cv2.INTER_LINEAR):
-    ori_height = img_ori.shape[0]
-    ori_width = img_ori.shape[1]
-    channel = img_ori.shape[2]
-
-    img_pad = np.zeros((height, width, channel), dtype=img_ori.dtype)
-    if channel == 1:
-        img_pad[:, :, 0] = padding_color[0]
-    else:
-        img_pad[:, :, 0] = padding_color[0]
-        img_pad[:, :, 1] = padding_color[1]
-        img_pad[:, :, 2] = padding_color[2]
-
-    if (ori_height / ori_width) > (height / width):
-        new_width = int(height / ori_height * ori_width)
-        img = cv2.resize(img_ori, (new_width, height), interpolation=interpolation)
-        padding = int((width - new_width) / 2)
-        if len(img.shape) == 2:
-            img = img[:, :, np.newaxis]
-        img_pad[:, padding: padding + new_width, :] = img
-    else:
-        new_height = int(width / ori_width * ori_height)
-        img = cv2.resize(img_ori, (width, new_height), interpolation=interpolation)
-        padding = int((height - new_height) / 2)
-        if len(img.shape) == 2:
-            img = img[:, :, np.newaxis]
-        img_pad[padding: padding + new_height, :, :] = img
-
-    return img_pad
 
 
 def get_face_bboxes(kp2ds, scale, image_shape):

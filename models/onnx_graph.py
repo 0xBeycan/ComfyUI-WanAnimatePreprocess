@@ -101,6 +101,10 @@ class OnnxGraph:
             i.name: [d.dim_value if d.dim_value else d.dim_param for d in i.type.tensor_type.shape.dim]
             for i in model.graph.input if i.name in self.inputs
         }
+        self.input_dtypes = {
+            i.name: _DTYPES.get(i.type.tensor_type.elem_type, torch.float32)
+            for i in model.graph.input if i.name in self.inputs
+        }
 
     def producer(self, name):
         for n in self.nodes:
@@ -141,6 +145,15 @@ def _same_pad(size, kernel, stride, dilation, lower):
     return (big, small) if lower else (small, big)
 
 
+QUANTIZED_OPS = {"QuantizeLinear", "DequantizeLinear", "DynamicQuantizeLinear", "QLinearConv", "QLinearMatMul",
+                 "MatMulInteger", "ConvInteger"}
+CONTROL_FLOW_OPS = {"If", "Loop", "Scan"}
+RESIZE_MODES = {("nearest", "asymmetric", "floor"), ("nearest", "half_pixel", "round_prefer_floor"),
+                ("nearest", "half_pixel", "round_prefer_ceil"), ("nearest", "pytorch_half_pixel", "round_prefer_floor"),
+                ("nearest", "pytorch_half_pixel", "round_prefer_ceil")}
+LINEAR_COORDS = {"half_pixel", "pytorch_half_pixel", "align_corners"}
+
+
 class GraphModule(nn.Module):
     """Executes an OnnxGraph. Float constants are parameters (they move with the module);
     integer/bool constants are shape and index arithmetic and stay on the CPU."""
@@ -161,10 +174,17 @@ class GraphModule(nn.Module):
             else:
                 self.consts[name] = t
 
-        missing = sorted({n.op for n in graph.nodes if not hasattr(self, "op_" + n.op)})
+        name = os.path.basename(graph.path)
+        quantized = sorted({n.op for n in graph.nodes if n.op in QUANTIZED_OPS})
+        if quantized:
+            raise ValueError(f"{name} is a quantized ONNX export ({', '.join(quantized)}); use the fp32 or fp16 model")
+        missing = sorted({n.op for n in graph.nodes if n.op in CONTROL_FLOW_OPS or not hasattr(self, "op_" + n.op)})
         if missing:
-            raise ValueError(
-                f"{os.path.basename(graph.path)} uses ONNX ops this loader does not implement: {', '.join(missing)}")
+            raise ValueError(f"{name} uses ONNX ops this loader does not implement: {', '.join(missing)}")
+        for n in graph.nodes:
+            problem = self._unsupported_attributes(n)
+            if problem:
+                raise ValueError(f"{name}: {n.op} ({n.name}) {problem}")
         self.nodes = graph.nodes
         self._ops = [getattr(self, "op_" + n.op) for n in self.nodes]
 
@@ -207,6 +227,31 @@ class GraphModule(nn.Module):
         return outs[0] if len(outs) == 1 else outs
 
     # -- helpers ---------------------------------------------------------------------------
+
+    def _unsupported_attributes(self, node):
+        """Why this node's attributes cannot be run, or None. Checked when the model is
+        loaded so a run never fails on a variant the ops do not handle."""
+        a = node.attrs
+        if node.op == "Cast" and a.get("to") not in _DTYPES:
+            return f"casts to an unsupported tensor type ({a.get('to')})"
+        if node.op == "Resize":
+            mode = a.get("mode", "nearest")
+            coord = a.get("coordinate_transformation_mode", "half_pixel")
+            if "axes" in a:
+                return "uses the axes attribute, which is not supported"
+            if mode == "nearest" and (mode, coord, a.get("nearest_mode", "round_prefer_floor")) not in RESIZE_MODES:
+                return f"resizes with nearest/{coord}/{a.get('nearest_mode', 'round_prefer_floor')}, which is not supported"
+            if mode in ("linear", "cubic") and coord not in LINEAR_COORDS:
+                return f"resizes with {mode}/{coord}, which is not supported"
+            if mode == "cubic" and a.get("cubic_coeff_a", -0.75) != -0.75:
+                return "uses a cubic_coeff_a other than -0.75, which is not supported"
+            if mode not in ("nearest", "linear", "cubic"):
+                return f"resizes with mode {mode}, which is not supported"
+        if node.op == "Upsample" and a.get("mode", "nearest") != "nearest":
+            return f"upsamples with mode {a.get('mode')}, which is not supported (nearest only)"
+        if node.op == "Pad" and a.get("mode", "constant") not in ("constant", "reflect", "edge", "wrap"):
+            return f"pads with mode {a.get('mode')}, which is not supported"
+        return None
 
     @staticmethod
     def _value(node, idx, tensor):
@@ -894,13 +939,3 @@ class GraphModule(nn.Module):
         if mode != "nearest":
             raise ValueError(f"Upsample {node.name}: only nearest mode is supported")
         return self._interpolate(node, x, "nearest", "asymmetric", "floor", scales, None, False)
-
-    # -- explicitly unsupported ------------------------------------------------------------
-
-    def _unsupported(self, node, *args):
-        raise ValueError(f"{node.op} ({node.name}) is not supported")
-
-    def op_QuantizeLinear(self, node, *args):
-        raise ValueError("quantized ONNX exports (QuantizeLinear/DequantizeLinear) are not supported; use the fp32 or fp16 model")
-
-    op_DequantizeLinear = op_QuantizeLinear
