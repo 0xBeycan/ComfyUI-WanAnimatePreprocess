@@ -19,6 +19,18 @@ POSE_INPUT_RESOLUTION = (256, 192)
 POSE_CROP_RESCALE = 1.25
 FACE_CROP_SCALE = 1.3
 FACE_SIZE = 512
+# A detector box that stops within this fraction of its own size from a frame edge belongs
+# to a person the frame cuts off; it is extended to that edge before it prompts the mask,
+# otherwise the decoder stops at the box and the clothing below it stays unmasked.
+EDGE_SNAP = 0.15
+
+
+def snap_to_frame(bbox, W, H):
+    x1, y1, x2, y2 = (float(v) for v in bbox[:4])
+    bw, bh = x2 - x1, y2 - y1
+    return np.array([0.0 if x1 < EDGE_SNAP * bw else x1, 0.0 if y1 < EDGE_SNAP * bh else y1,
+                     float(W) if W - x2 < EDGE_SNAP * bw else x2, float(H) if H - y2 < EDGE_SNAP * bh else y2,
+                     float(bbox[4])])
 
 
 def detect(detector, pose_model, images, face_padding=0, sam3_model="none"):
@@ -26,10 +38,11 @@ def detect(detector, pose_model, images, face_padding=0, sam3_model="none"):
 
     Returns (pose_data, face_images, mask): pose_data carries the per-frame pose metas
     (`pose_metas` as AAPoseMeta for drawing, `pose_metas_original` as dicts with the
-    normalised keypoints) and `detections` (the chosen person box, its score, -1 when
-    nothing was detected and the whole frame was used, and the number of people the
-    detector was fairly sure of); face_images are 512x512 crops around the face;
-    mask is the SAM3 person mask, empty when no SAM3 checkpoint is selected."""
+    normalised keypoints) and `detections` (the chosen person box as it prompts the mask,
+    extended to frame edges it nearly touches, its score, -1 when nothing was detected and
+    the whole frame was used, and the number of people the detector was fairly sure of);
+    face_images are 512x512 crops around the face; mask is the SAM3 person mask, empty
+    when no SAM3 checkpoint is selected."""
     B, H, W, C = images.shape
     shape = np.array([H, W])[None]
     images_np = images.numpy()
@@ -53,6 +66,7 @@ def detect(detector, pose_model, images, face_padding=0, sam3_model="none"):
             pbar.update_absolute(i + 1)
         result["frames without a person"] = sum(1 for b in bboxes if b[-1] <= 0)
         result["frames with several people"] = sum(1 for n in person_counts if n > 1)
+    prompt_boxes = [snap_to_frame(b, W, H) for b in bboxes]
 
     kp2ds = []
     with log.step(f"extracting keypoints on {B} frames"):
@@ -88,14 +102,14 @@ def detect(detector, pose_model, images, face_padding=0, sam3_model="none"):
         "pose_metas": [AAPoseMeta.from_humanapi_meta(meta) for meta in pose_metas],
         "pose_metas_original": pose_metas,
         "detections": [
-            {"bbox": [float(v) for v in bbox[:4]], "score": float(bbox[4]), "persons": int(count)}
-            for bbox, count in zip(bboxes, person_counts)
+            {"bbox": [float(v) for v in box[:4]], "score": float(box[4]), "persons": int(count)}
+            for box, count in zip(prompt_boxes, person_counts)
         ],
     }
     if sam3_model != "none":
         result = {}
         with log.step(f"segmenting the person with {sam3_model} on {B} frames", result):
-            mask = segment_frames(load_sam3(sam3_model), images, bboxes, pose_metas)
+            mask = segment_frames(load_sam3(sam3_model), images, prompt_boxes, pose_metas)
             coverage = mask.mean(dim=(1, 2))
             result["empty masks"] = int((coverage == 0).sum())
             result["mask coverage"] = f"{coverage.min() * 100:.1f}-{coverage.max() * 100:.1f}%"
