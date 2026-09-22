@@ -1,9 +1,12 @@
 """Person segmentation with SAM 3 / SAM 3.1, driven by the pose detector.
 
-There is no text prompt and no tracker. Every frame is segmented from what the pose
-pipeline already knows about it: the detector's person box and the body keypoints, given
-to the SAM decoder as a box and positive points. Frames are independent, so nothing
-drifts or ghosts over a long clip; each mask is as good as that frame's detection.
+There is no text prompt. The person is described to SAM by what the pose pipeline already
+knows about each frame: the detector's box and the body keypoints, as a box and positive
+points on the joints, along the limbs and down the torso. That mask then propagates through
+the tracker's memory, which is what carries the mask through motion blur, and the tracker
+is re-seeded from a fresh prompt every `RESEED_INTERVAL` frames and whenever its mask stops
+covering the keypoints - so the memory cannot drift away from the person the way a tracker
+prompted only once does.
 
 The model is ComfyUI's own SAM3 implementation loaded from `models/checkpoints`
 (`sam3.1_multiplex_fp16.safetensors`, fetched on first use when missing), so it is loaded
@@ -42,11 +45,16 @@ LIMB_FRACTIONS = (0.5,)
 # Limbs to put a point on, as (from, to) keypoints: thighs, shins and upper arms.
 LIMBS = ((R_HIP, 9), (L_HIP, 12), (9, 10), (12, 13), (R_SHOULDER, 3), (L_SHOULDER, 6))
 MIN_KEYPOINT_CONF = 0.3
-# The previous frame's mask is given to the decoder as a prior alongside the box and the
-# points: on a close-up, where the person fills the frame and the boundary is ambiguous,
-# an independent decision per frame makes the mask flicker. The prior is dropped when the
-# detector box jumps (a cut, or another subject), so a wrong mask cannot carry on.
-MIN_PRIOR_BOX_IOU = 0.5
+# How long the tracker may propagate before it is re-seeded from a fresh prompt. The
+# tracker's own object score decays without reconditioning (the mask dies after a few
+# hundred frames), so it is re-anchored well before that; the memory is what keeps the
+# mask through frames the pose model loses to motion blur.
+RESEED_INTERVAL = 24
+# A propagated mask that stops covering this fraction of the frame's confident keypoints
+# has come off the person: re-seed immediately.
+MIN_TRACKED_RECALL = 0.9
+# A binary mask handed to the tracker as logits: +/- this value.
+MASK_LOGIT_SCALE = 10.0
 # Islands smaller than this fraction of the largest region are decoder noise (specks in
 # shadows and edges), not the person; downstream block masks would blow them up.
 MIN_ISLAND_FRACTION = 0.01
@@ -177,50 +185,105 @@ def box_iou(a, b):
     return inter / union if union > 0 else 0.0
 
 
+def prompt_for(frame_index, bboxes, pose_metas, W, H, device, dtype):
+    """(box_inputs, point_inputs) for the SAM decoder in its 1008x1008 space, or (None, None)
+    when the frame has neither a detection nor a confident keypoint."""
+    sx, sy = SAM3_SIZE / W, SAM3_SIZE / H
+    bbox = bboxes[frame_index]
+    box_inputs = None
+    if bbox is not None and bbox[-1] > 0:
+        box_inputs = torch.tensor([[[bbox[0] * sx, bbox[1] * sy], [bbox[2] * sx, bbox[3] * sy]]], device=device, dtype=dtype)
+    kps = pose_metas[frame_index]["keypoints_body"]
+    points = [(kps[k][0], kps[k][1]) for k in PROMPT_KEYPOINTS if kps[k][2] > MIN_KEYPOINT_CONF]
+    points += body_points(kps, MIN_KEYPOINT_CONF)
+    point_inputs = None
+    if points:
+        point_inputs = {"point_coords": torch.tensor([[(x * SAM3_SIZE, y * SAM3_SIZE) for x, y in points]], device=device, dtype=dtype),
+                        "point_labels": torch.ones(1, len(points), dtype=torch.int32, device=device)}
+    return box_inputs, point_inputs
+
+
+def keypoint_recall(mask, kps, W, H):
+    """Fraction of the frame's confident body keypoints that fall inside `mask`, 1.0 when
+    the pose model is sure of none of them."""
+    confident = [(int(min(max(x * W, 0), W - 1)), int(min(max(y * H, 0), H - 1))) for x, y, c in kps if c > MIN_KEYPOINT_CONF]
+    if not confident:
+        return 1.0
+    return sum(1 for x, y in confident if mask[y, x]) / len(confident)
+
+
+def clean(mask):
+    """A person's mask: no enclosed holes, no islands far smaller than the body."""
+    return drop_islands(fill_holes(mask.astype(np.uint8)))
+
+
 def segment_frames(model, images, bboxes, pose_metas, refine=True, temporal=True):
     """[N, H, W] float masks of the detected person in `images` [N, H, W, 3].
 
     `bboxes[i]` is frame i's detector box as (x1, y1, x2, y2, score); a score of -1 means
     nothing was detected. `pose_metas[i]["keypoints_body"]` are its body keypoints,
-    normalised to the frame, with confidence. A frame with neither a box nor a confident
-    keypoint gets an empty mask. With `temporal`, the previous frame's mask is carried into
-    the decoder as a prior, which keeps an ambiguous boundary from flickering. Holes the
-    mask encloses are filled and islands far smaller than the person are dropped."""
+    normalised to the frame, with confidence. The first frame of every segment is prompted
+    with that box and those keypoints, the tracker then propagates the mask with its memory,
+    and a new segment starts every RESEED_INTERVAL frames or as soon as the propagated mask
+    stops covering the keypoints. With `temporal` off, every frame is prompted on its own
+    (no memory), which is worse through motion blur but does not depend on the tracker."""
     N, H, W, _ = images.shape
     mm.load_model_gpu(model)
     device, dtype = mm.get_torch_device(), model.model.get_dtype()
     sam3 = model.model.diffusion_model
-    sx, sy = SAM3_SIZE / W, SAM3_SIZE / H
+    frames_chw = images[..., :3].movedim(-1, 1)
     masks = torch.zeros(N, H, W)
     pbar = ProgressBar(N)
-    prior, prior_box = None, None
-    for i in range(N):
-        box_inputs = point_inputs = None
-        bbox = bboxes[i]
-        detected = bbox is not None and bbox[-1] > 0
-        if detected:
-            box_inputs = torch.tensor([[[bbox[0] * sx, bbox[1] * sy], [bbox[2] * sx, bbox[3] * sy]]],
-                                      device=device, dtype=dtype)
-        kps = pose_metas[i]["keypoints_body"]
-        points = [(kps[k][0], kps[k][1]) for k in PROMPT_KEYPOINTS if kps[k][2] > MIN_KEYPOINT_CONF]
-        points += body_points(kps, MIN_KEYPOINT_CONF)
-        points = [(x * SAM3_SIZE, y * SAM3_SIZE) for x, y in points]
-        if points:
-            point_inputs = {"point_coords": torch.tensor([points], device=device, dtype=dtype),
-                            "point_labels": torch.ones(1, len(points), dtype=torch.int32, device=device)}
+    i = 0
+    seeds = 0
+    while i < N:
+        box_inputs, point_inputs = prompt_for(i, bboxes, pose_metas, W, H, device, dtype)
         if box_inputs is None and point_inputs is None:
-            prior, prior_box = None, None
             pbar.update(1)
+            i += 1
             continue
-        # the prior only carries over while the person stays where it was
-        if prior is not None and not (detected and prior_box is not None and box_iou(bbox, prior_box) >= MIN_PRIOR_BOX_IOU):
-            prior = None
-        frame = common_upscale(images[i:i + 1, ..., :3].movedim(-1, 1), SAM3_SIZE, SAM3_SIZE, "bilinear", crop="disabled")
-        frame = frame.to(device=device, dtype=dtype)
+        frame = common_upscale(frames_chw[i:i + 1], SAM3_SIZE, SAM3_SIZE, "bilinear", crop="disabled").to(device, dtype)
         with torch.inference_mode():
-            logits = decode(sam3, frame, point_inputs, box_inputs, refine, mask_prior=prior)
-            mask = F.interpolate(logits.float(), size=(H, W), mode="bilinear", align_corners=False)[0, 0]
-        masks[i] = torch.from_numpy(drop_islands(fill_holes((mask > 0).cpu().numpy().astype(np.uint8)))).float()
-        prior, prior_box = (logits, bbox) if temporal and detected else (None, None)
+            logits = decode(sam3, frame, point_inputs, box_inputs, refine)
+            seed = (F.interpolate(logits.float(), size=(H, W), mode="bilinear", align_corners=False)[0, 0] > 0).cpu().numpy()
+        masks[i] = torch.from_numpy(clean(seed)).float()
+        seeds += 1
         pbar.update(1)
+        i += 1
+        if not temporal:
+            continue
+        # propagate from this frame with the tracker's memory
+        end = min(i + RESEED_INTERVAL - 1, N)
+        if end <= i:
+            continue
+        with torch.inference_mode():
+            tracked = propagate(sam3, frames_chw[i - 1:end], masks[i - 1], device, dtype, H, W)
+        for k, mask in enumerate(tracked, start=i):
+            kps = pose_metas[k]["keypoints_body"]
+            if keypoint_recall(mask, kps, W, H) < MIN_TRACKED_RECALL:
+                break   # the mask came off the person: re-seed from this frame's prompt
+            masks[k] = torch.from_numpy(clean(mask)).float()
+            pbar.update(1)
+            i = k + 1
+    log.info(f"tracked {N} frames from {seeds} prompted frame(s)")
     return masks
+
+
+def propagate(sam3, frames_chw, first_mask, device, dtype, H, W):
+    """Masks for frames_chw[1:], propagated by the tracker's memory from `first_mask` on
+    frames_chw[0]. Returns [] when this ComfyUI's tracker cannot be driven this way."""
+    initial = (first_mask[None, None].to(device, dtype) * 2 - 1) * MASK_LOGIT_SCALE
+    try:
+        with torch.inference_mode():
+            result = sam3.forward_video(images=frames_chw, initial_masks=initial, text_prompts=None,
+                                        max_objects=1, detect_interval=1, target_device=device, target_dtype=dtype)
+        packed = result["packed_masks"]
+        if packed is None:
+            return []
+        from comfy.ldm.sam3.tracker import unpack_masks
+        tracked = unpack_masks(packed[:, 0]).float()[:, None]
+        tracked = F.interpolate(tracked, size=(H, W), mode="bilinear", align_corners=False)[:, 0] > 0.5
+        return [m.cpu().numpy() for m in tracked[1:]]
+    except (AttributeError, KeyError, TypeError, ValueError) as e:
+        log.warning(f"this ComfyUI's SAM3 tracker cannot be propagated ({e}); prompting every frame instead")
+        return []
