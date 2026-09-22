@@ -31,7 +31,42 @@ if _detection_exts and ".onnx" not in _detection_exts:
     if hasattr(_cache_helper, "clear"):
         _cache_helper.clear()
 
-from .models.onnx_models import ViTPose, Yolo
+from .models.download import download
+from .models.onnx_models import ViTPose, Yolo, load_models
+
+# The models the example workflow uses, fetched on first use when they are not in
+# models/detection. Each entry lists every file the model needs.
+DEFAULT_VITPOSE = "vitpose_h_wholebody_model.onnx"
+DEFAULT_YOLO = "yolov10x.onnx"
+DEFAULT_MODELS = {
+    DEFAULT_VITPOSE: (
+        ("vitpose_h_wholebody_model.onnx", "https://huggingface.co/Kijai/vitpose_comfy/resolve/main/onnx/vitpose_h_wholebody_model.onnx"),
+        ("vitpose_h_wholebody_data.bin", "https://huggingface.co/Kijai/vitpose_comfy/resolve/main/onnx/vitpose_h_wholebody_data.bin"),
+    ),
+    DEFAULT_YOLO: (
+        ("yolov10x.onnx", "https://huggingface.co/onnx-community/yolov10x/resolve/main/onnx/model.onnx"),
+    ),
+}
+
+
+def detection_model_choices():
+    """Files in models/detection plus the defaults, which are listed before they exist so a
+    workflow can select them and have them downloaded on its first run."""
+    return sorted(set(folder_paths.get_filename_list("detection")) | set(DEFAULT_MODELS))
+
+
+def detection_model_path(name):
+    """Full path of a model in models/detection; a default model that is missing (or missing
+    one of its files) is downloaded first, next to the .onnx if that already exists."""
+    files = DEFAULT_MODELS.get(name, ())
+    if files:
+        found = folder_paths.get_full_path("detection", name)
+        target_dir = os.path.dirname(found) if found else _detection_path
+        os.makedirs(target_dir, exist_ok=True)
+        for filename, url in files:
+            if not os.path.isfile(os.path.join(target_dir, filename)):
+                download(url, os.path.join(target_dir, filename))
+    return folder_paths.get_full_path_or_raise("detection", name)
 from .pose_utils.pose2d_utils import load_pose_metas_from_kp2ds_seq, crop, bbox_from_detector
 from .utils import get_face_bboxes, padding_resize, resize_by_area, resize_to_bounds
 from .models.sam3 import load_sam3, sam3_choices, segment_frames
@@ -43,9 +78,8 @@ class OnnxDetectionModelLoader:
     def INPUT_TYPES(s):
         return {
             "required": {
-                "vitpose_model": (folder_paths.get_filename_list("detection"), {"tooltip": "These models are loaded from the 'ComfyUI/models/detection' -folder",}),
-                "yolo_model": (folder_paths.get_filename_list("detection"), {"tooltip": "These models are loaded from the 'ComfyUI/models/detection' -folder",}),
-                "onnx_device": (["CUDAExecutionProvider", "CPUExecutionProvider"], {"default": "CUDAExecutionProvider", "tooltip": "Device to run the ONNX models on"}),
+                "vitpose_model": (detection_model_choices(), {"default": DEFAULT_VITPOSE, "tooltip": f"Loaded from the 'ComfyUI/models/detection' folder; {DEFAULT_VITPOSE} is downloaded on first use when missing",}),
+                "yolo_model": (detection_model_choices(), {"default": DEFAULT_YOLO, "tooltip": f"Loaded from the 'ComfyUI/models/detection' folder; {DEFAULT_YOLO} is downloaded on first use when missing",}),
             },
         }
 
@@ -53,15 +87,15 @@ class OnnxDetectionModelLoader:
     RETURN_NAMES = ("model", )
     FUNCTION = "loadmodel"
     CATEGORY = "WanAnimatePreprocess"
-    DESCRIPTION = "Loads ONNX models for pose and face detection. ViTPose for pose estimation and YOLO for object detection."
+    DESCRIPTION = "Loads the ONNX models for pose and face detection, ViTPose for pose estimation and YOLO for person detection, and runs them with torch on ComfyUI's device."
 
-    def loadmodel(self, vitpose_model, yolo_model, onnx_device):
+    def loadmodel(self, vitpose_model, yolo_model):
 
-        vitpose_model_path = folder_paths.get_full_path_or_raise("detection", vitpose_model)
-        yolo_model_path = folder_paths.get_full_path_or_raise("detection", yolo_model)
+        vitpose_model_path = detection_model_path(vitpose_model)
+        yolo_model_path = detection_model_path(yolo_model)
 
-        vitpose = ViTPose(vitpose_model_path, onnx_device)
-        yolo = Yolo(yolo_model_path, onnx_device)
+        vitpose = ViTPose(vitpose_model_path)
+        yolo = Yolo(yolo_model_path)
 
         model = {
             "vitpose": vitpose,
@@ -106,8 +140,7 @@ class WanAnimateV1Preprocess:
         input_resolution=(256, 192)
         rescale = 1.25
 
-        detector.reinit()
-        pose_model.reinit()
+        load_models(detector, pose_model)
         if retarget_image is not None:
             refer_img = resize_by_area(retarget_image[0].numpy() * 255, width * height, divisor=16) / 255.0
             ref_bbox = (detector(
@@ -139,8 +172,6 @@ class WanAnimateV1Preprocess:
             if progress % 10 == 0:
                 comfy_pbar.update_absolute(progress)
 
-        detector.cleanup()
-
         kp2ds = []
         for img, bbox in tqdm(zip(images_np, bboxes), total=len(images_np), desc="Extracting keypoints"):
             if bbox is None or bbox[-1] <= 0 or (bbox[2] - bbox[0]) < 10 or (bbox[3] - bbox[1]) < 10:
@@ -158,8 +189,6 @@ class WanAnimateV1Preprocess:
             progress += 1
             if progress % 10 == 0:
                 comfy_pbar.update_absolute(progress)
-
-        pose_model.cleanup()
 
         kp2ds = np.concatenate(kp2ds, 0)
         pose_metas = load_pose_metas_from_kp2ds_seq(kp2ds, width=W, height=H)
@@ -401,8 +430,7 @@ class PoseDetectionOneToAllAnimation:
         input_resolution=(256, 192)
         rescale = 1.25
 
-        detector.reinit()
-        pose_model.reinit()
+        load_models(detector, pose_model)
 
         if ref_image is not None:
             refer_img_np = ref_image[0].numpy() * 255
@@ -438,8 +466,6 @@ class PoseDetectionOneToAllAnimation:
             if progress % 10 == 0:
                 comfy_pbar.update_absolute(progress)
 
-        detector.cleanup()
-
         kp2ds = []
         for img, bbox in tqdm(zip(images_np, bboxes), total=len(images_np), desc="Extracting keypoints"):
             if bbox is None or bbox[-1] <= 0 or (bbox[2] - bbox[0]) < 10 or (bbox[3] - bbox[1]) < 10:
@@ -457,8 +483,6 @@ class PoseDetectionOneToAllAnimation:
             progress += 1
             if progress % 10 == 0:
                 comfy_pbar.update_absolute(progress)
-
-        pose_model.cleanup()
 
         kp2ds = np.concatenate(kp2ds, 0)
         pose_metas = load_pose_metas_from_kp2ds_seq(kp2ds, width=W, height=H)

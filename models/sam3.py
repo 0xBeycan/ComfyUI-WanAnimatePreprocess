@@ -9,7 +9,6 @@ The model is ComfyUI's own SAM3 implementation loaded from `models/checkpoints`
 (`sam3.1_multiplex_fp16.safetensors`, fetched on first use when missing), so it is loaded
 and offloaded by ComfyUI like every other model.
 """
-import logging
 import os
 
 import cv2
@@ -20,7 +19,8 @@ import comfy.sd
 import folder_paths
 from comfy import model_management as mm
 from comfy.utils import ProgressBar, common_upscale
-from tqdm import tqdm
+
+from .download import download
 
 DEFAULT_SAM3 = "sam3.1_multiplex_fp16.safetensors"
 DEFAULT_SAM3_URL = "https://huggingface.co/Comfy-Org/sam3.1/resolve/main/checkpoints/sam3.1_multiplex_fp16.safetensors"
@@ -49,30 +49,6 @@ def sam3_choices():
     """SAM3 checkpoints in models/checkpoints (by name), plus the default before it exists."""
     names = [n for n in folder_paths.get_filename_list("checkpoints") if "sam3" in os.path.basename(n).lower()]
     return ["none"] + sorted(set(names) | {DEFAULT_SAM3})
-
-
-def download(url, path):
-    """Stream `url` to `path` through a .part file, so an interrupted download never leaves
-    a truncated model behind."""
-    import urllib.request
-
-    name = os.path.basename(path)
-    logging.info(f"[WanAnimatePreprocess] downloading {name} from {url}")
-    part = path + ".part"
-    try:
-        request = urllib.request.Request(url, headers={"User-Agent": "ComfyUI-WanAnimatePreprocess"})
-        with urllib.request.urlopen(request) as response, open(part, "wb") as out:
-            total = int(response.headers.get("Content-Length") or 0)
-            comfy_pbar = ProgressBar(total) if total else None
-            with tqdm(total=total or None, unit="B", unit_scale=True, desc=name) as pbar:
-                for chunk in iter(lambda: response.read(1 << 20), b""):
-                    out.write(chunk)
-                    pbar.update(len(chunk))
-                    if comfy_pbar is not None:
-                        comfy_pbar.update_absolute(pbar.n)
-    except Exception as e:
-        raise RuntimeError(f"Could not download {name} from {url} ({e}). Download it by hand to {path}") from e
-    os.replace(part, path)
 
 
 _loaded = {"name": None, "model": None}

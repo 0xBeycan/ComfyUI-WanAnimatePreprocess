@@ -3,7 +3,7 @@ name = "ComfyUI-WanAnimatePreprocess"
 description = "ComfyUI nodes for WanAnimate input processing"
 version = "1.0.4"
 license = {file = "LICENSE"}
-dependencies = ["opencv-python", "onnxruntime-gpu", "onnx"]
+dependencies = ["opencv-python", "onnx"]
 
 [project.urls]
 Repository = "https://github.com/kijai/ComfyUI-WanAnimatePreprocess"

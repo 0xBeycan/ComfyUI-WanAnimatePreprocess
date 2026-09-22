@@ -1034,8 +1034,7 @@
       },
       "widgets_values": [
         "vitpose_h_wholebody_model.onnx",
-        "onnx\\yolov10x.onnx",
-        "CUDAExecutionProvider"
+        "yolov10x.onnx"
       ]
     },
     {
