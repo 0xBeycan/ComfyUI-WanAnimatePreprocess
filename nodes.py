@@ -299,13 +299,9 @@ class WanAnimatePreprocess:
                 "sam3_model": (sam3_choices(), {"default": DEFAULT_SAM3, "tooltip": "SAM 3 / 3.1 checkpoint from 'ComfyUI/models/checkpoints' (sam3.1_multiplex_fp16.safetensors is downloaded on first use when missing). Every frame's person is segmented from its detected bbox and body keypoints, no text prompt and no tracking; 'none' leaves the mask output empty"}),
                 "width": ("INT", {"default": 832, "min": 64, "max": 2048, "step": 1, "tooltip": "Width of the generation"}),
                 "height": ("INT", {"default": 480, "min": 64, "max": 2048, "step": 1, "tooltip": "Height of the generation"}),
-                "retarget_padding": ("INT", {"default": 16, "min": 0, "max": 512, "step": 1, "tooltip": "When > 0, the retargeted pose image is padded and resized to the target size"}),
                 "body_stick_width": ("INT", {"default": -1, "min": -1, "max": 20, "step": 1, "tooltip": "Width of the body sticks. Set to 0 to disable body drawing, -1 for auto"}),
                 "hand_stick_width": ("INT", {"default": -1, "min": -1, "max": 20, "step": 1, "tooltip": "Width of the hand sticks. Set to 0 to disable hand drawing, -1 for auto"}),
                 "draw_head": ("BOOLEAN", {"default": True, "tooltip": "Whether to draw head keypoints"}),
-            },
-            "optional": {
-                "retarget_image": ("IMAGE", {"default": None, "tooltip": "Optional reference image for pose retargeting"}),
                 "face_padding": ("INT", {"default": 0, "min": 0, "max": 512, "step": 1, "tooltip": "When > 0, the detected face images are padded and resized to 512x512"}),
             },
         }
@@ -314,14 +310,14 @@ class WanAnimatePreprocess:
     RETURN_NAMES = ("pose_images", "face_images", "mask", "pose_data")
     FUNCTION = "process"
     CATEGORY = "WanAnimatePreprocess"
-    DESCRIPTION = "The whole WanAnimate preprocess in one node: loads the selected ViTPose, YOLO and SAM3 models (downloading the defaults when missing), detects the person's pose and face on every frame, segments the person from its bbox and keypoints, optionally retargets the pose to a reference image, and draws the pose images."
+    DESCRIPTION = "The whole WanAnimate preprocess in one node: loads the selected ViTPose, YOLO and SAM3 models (downloading the defaults when missing), detects the person's pose and face on every frame, segments the person from its bbox and keypoints, and draws the pose images."
 
-    def process(self, images, vitpose_model, yolo_model, sam3_model, width, height, retarget_padding, body_stick_width,
-                hand_stick_width, draw_head, retarget_image=None, face_padding=0):
+    def process(self, images, vitpose_model, yolo_model, sam3_model, width, height, body_stick_width, hand_stick_width,
+                draw_head, face_padding):
         model = load_detection_models(vitpose_model, yolo_model)
         pose_data, face_images, _, _, _, mask = PoseAndFaceDetection().process(
-            model, images, width, height, retarget_image=retarget_image, face_padding=face_padding, sam3_model=sam3_model)
-        pose_images = DrawViTPose().process(pose_data, width, height, body_stick_width, hand_stick_width, draw_head, retarget_padding)[0]
+            model, images, width, height, face_padding=face_padding, sam3_model=sam3_model)
+        pose_images = DrawViTPose().process(pose_data, width, height, body_stick_width, hand_stick_width, draw_head, retarget_padding=0)[0]
         return (pose_images, face_images, mask, pose_data)
 
 
