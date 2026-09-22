@@ -330,8 +330,8 @@ class WanAnimatePreprocessGuard:
     def INPUT_TYPES(s):
         return {
             "required": {
-                "pose_data": ("POSEDATA",),
                 "mask": ("MASK",),
+                "pose_data": ("POSEDATA",),
                 "pose_guard": ("BOOLEAN", {"default": True, "tooltip": "Stop the workflow when a pose check fails (no detection, low confidence, torso jump, subject switch)"}),
                 "mask_guard": ("BOOLEAN", {"default": True, "tooltip": "Stop the workflow when a mask check fails (empty, leaking, fragmented, keypoints outside, unstable)"}),
                 "min_keypoint_conf": ("FLOAT", {"default": 0.3, "min": 0.0, "max": 1.0, "step": 0.05, "tooltip": "Keypoints below this confidence are left out of the checks"}),
@@ -344,13 +344,13 @@ class WanAnimatePreprocessGuard:
             },
         }
 
-    RETURN_TYPES = ("POSEDATA", "MASK", "STRING", "STRING", "IMAGE")
-    RETURN_NAMES = ("pose_data", "mask", "report", "metrics", "timeline")
+    RETURN_TYPES = ("MASK", "POSEDATA", "STRING", "STRING", "IMAGE")
+    RETURN_NAMES = ("mask", "pose_data", "report", "metrics", "timeline")
     FUNCTION = "check"
     CATEGORY = "WanAnimatePreprocess"
     DESCRIPTION = "Beta. Checks the pose and the mask of WanAnimate Preprocess frame by frame (missing detections, pose glitches, empty / leaking / fragmented masks, keypoints outside the mask, unstable masks). Wire it between the preprocess and the sampler: a failed check of an enabled guard stops the workflow with the report; 'metrics' has every measurement per frame and 'timeline' plots them."
 
-    def check(self, pose_data, mask, pose_guard, mask_guard, min_keypoint_conf, min_pose_conf, max_torso_jump,
+    def check(self, mask, pose_data, pose_guard, mask_guard, min_keypoint_conf, min_pose_conf, max_torso_jump,
               min_mask_to_box, max_mask_outside_box, min_keypoint_recall, min_mask_iou):
         thresholds = {
             "min_keypoint_conf": min_keypoint_conf, "min_pose_conf": min_pose_conf, "max_torso_jump": max_torso_jump,
@@ -361,7 +361,7 @@ class WanAnimatePreprocessGuard:
         logging.info("[WanAnimatePreprocess] " + report.replace("\n", "\n    "))
         if not passed:
             raise RuntimeError(report)
-        return (pose_data, mask, report, metrics, timeline)
+        return (mask, pose_data, report, metrics, timeline)
 
 class DrawViTPose:
     @classmethod
