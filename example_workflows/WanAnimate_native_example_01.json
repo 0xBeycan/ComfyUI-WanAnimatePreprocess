@@ -1658,7 +1658,7 @@
     },
     {
       "id": 172,
-      "type": "WanAnimateV1Preprocess",
+      "type": "PoseAndFaceDetection",
       "pos": [
         104.5530014038086,
         -3028.416015625
@@ -1735,7 +1735,7 @@
       "properties": {
         "aux_id": "kijai/ComfyUI-WanAnimatePreprocess",
         "ver": "e63d6e71ae4c271f3f81211a7ca7f87607b7e50d",
-        "Node name for S&R": "WanAnimateV1Preprocess"
+        "Node name for S&R": "PoseAndFaceDetection"
       },
       "widgets_values": [
         832,

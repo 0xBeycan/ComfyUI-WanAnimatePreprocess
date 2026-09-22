@@ -69,10 +69,27 @@ def detection_model_path(name):
     return folder_paths.get_full_path_or_raise("detection", name)
 from .pose_utils.pose2d_utils import load_pose_metas_from_kp2ds_seq, crop, bbox_from_detector
 from .utils import get_face_bboxes, padding_resize, resize_by_area, resize_to_bounds
-from .models.sam3 import load_sam3, sam3_choices, segment_frames
+from .models.sam3 import DEFAULT_SAM3, load_sam3, sam3_choices, segment_frames
 from .pose_utils.human_visualization import AAPoseMeta, draw_aapose_by_meta_new
 from .retarget_pose import get_retarget_pose
 from .guard import run_guard
+
+_detection_models = {"names": None, "models": None}
+
+
+def load_detection_models(vitpose_model, yolo_model):
+    """The ViTPose and YOLO models as {"vitpose", "yolo"}, loaded once and kept for the
+    same selection; defaults are downloaded on first use."""
+    if _detection_models["names"] == (vitpose_model, yolo_model):
+        return _detection_models["models"]
+    _detection_models["names"], _detection_models["models"] = None, None
+    models = {
+        "vitpose": ViTPose(detection_model_path(vitpose_model)),
+        "yolo": Yolo(detection_model_path(yolo_model)),
+    }
+    _detection_models["names"], _detection_models["models"] = (vitpose_model, yolo_model), models
+    return models
+
 
 class OnnxDetectionModelLoader:
     @classmethod
@@ -91,21 +108,9 @@ class OnnxDetectionModelLoader:
     DESCRIPTION = "Loads the ONNX models for pose and face detection, ViTPose for pose estimation and YOLO for person detection, and runs them with torch on ComfyUI's device."
 
     def loadmodel(self, vitpose_model, yolo_model):
+        return (load_detection_models(vitpose_model, yolo_model), )
 
-        vitpose_model_path = detection_model_path(vitpose_model)
-        yolo_model_path = detection_model_path(yolo_model)
-
-        vitpose = ViTPose(vitpose_model_path)
-        yolo = Yolo(yolo_model_path)
-
-        model = {
-            "vitpose": vitpose,
-            "yolo": yolo,
-        }
-
-        return (model, )
-
-class WanAnimateV1Preprocess:
+class PoseAndFaceDetection:
     @classmethod
     def INPUT_TYPES(s):
         return {
@@ -282,6 +287,43 @@ class WanAnimateV1Preprocess:
             mask = torch.zeros(B, H, W)
 
         return (pose_data, face_images_tensor, json.dumps(points_dict_list), [bbox_ints], face_bboxes, mask)
+
+class WanAnimateV1Preprocess:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "images": ("IMAGE",),
+                "vitpose_model": (detection_model_choices(), {"default": DEFAULT_VITPOSE, "tooltip": f"Loaded from the 'ComfyUI/models/detection' folder; {DEFAULT_VITPOSE} is downloaded on first use when missing"}),
+                "yolo_model": (detection_model_choices(), {"default": DEFAULT_YOLO, "tooltip": f"Loaded from the 'ComfyUI/models/detection' folder; {DEFAULT_YOLO} is downloaded on first use when missing"}),
+                "sam3_model": (sam3_choices(), {"default": DEFAULT_SAM3, "tooltip": "SAM 3 / 3.1 checkpoint from 'ComfyUI/models/checkpoints' (sam3.1_multiplex_fp16.safetensors is downloaded on first use when missing). Every frame's person is segmented from its detected bbox and body keypoints, no text prompt and no tracking; 'none' leaves the mask output empty"}),
+                "width": ("INT", {"default": 832, "min": 64, "max": 2048, "step": 1, "tooltip": "Width of the generation"}),
+                "height": ("INT", {"default": 480, "min": 64, "max": 2048, "step": 1, "tooltip": "Height of the generation"}),
+                "retarget_padding": ("INT", {"default": 16, "min": 0, "max": 512, "step": 1, "tooltip": "When > 0, the retargeted pose image is padded and resized to the target size"}),
+                "body_stick_width": ("INT", {"default": -1, "min": -1, "max": 20, "step": 1, "tooltip": "Width of the body sticks. Set to 0 to disable body drawing, -1 for auto"}),
+                "hand_stick_width": ("INT", {"default": -1, "min": -1, "max": 20, "step": 1, "tooltip": "Width of the hand sticks. Set to 0 to disable hand drawing, -1 for auto"}),
+                "draw_head": ("BOOLEAN", {"default": True, "tooltip": "Whether to draw head keypoints"}),
+            },
+            "optional": {
+                "retarget_image": ("IMAGE", {"default": None, "tooltip": "Optional reference image for pose retargeting"}),
+                "face_padding": ("INT", {"default": 0, "min": 0, "max": 512, "step": 1, "tooltip": "When > 0, the detected face images are padded and resized to 512x512"}),
+            },
+        }
+
+    RETURN_TYPES = ("IMAGE", "POSEDATA", "IMAGE", "STRING", "BBOX", "BBOX,", "MASK")
+    RETURN_NAMES = ("pose_images", "pose_data", "face_images", "key_frame_body_points", "bboxes", "face_bboxes", "mask")
+    FUNCTION = "process"
+    CATEGORY = "WanAnimatePreprocess"
+    DESCRIPTION = "The whole WanAnimate preprocess in one node: loads the selected ViTPose, YOLO and SAM3 models (downloading the defaults when missing), detects the person's pose and face on every frame, segments the person from its bbox and keypoints, optionally retargets the pose to a reference image, and draws the pose images."
+
+    def process(self, images, vitpose_model, yolo_model, sam3_model, width, height, retarget_padding, body_stick_width,
+                hand_stick_width, draw_head, retarget_image=None, face_padding=0):
+        model = load_detection_models(vitpose_model, yolo_model)
+        pose_data, face_images, key_points, bboxes, face_bboxes, mask = PoseAndFaceDetection().process(
+            model, images, width, height, retarget_image=retarget_image, face_padding=face_padding, sam3_model=sam3_model)
+        pose_images = DrawViTPose().process(pose_data, width, height, body_stick_width, hand_stick_width, draw_head, retarget_padding)[0]
+        return (pose_images, pose_data, face_images, key_points, bboxes, face_bboxes, mask)
+
 
 class WanAnimateV1PreprocessGuard:
     @classmethod
@@ -577,8 +619,8 @@ class PoseDetectionOneToAllAnimation:
 NODE_CLASS_MAPPINGS = {
     "OnnxDetectionModelLoader": OnnxDetectionModelLoader,
     "WanAnimateV1Preprocess": WanAnimateV1Preprocess,
-    "PoseAndFaceDetection": WanAnimateV1Preprocess,  # former name, keeps saved workflows loading
     "WanAnimateV1PreprocessGuard": WanAnimateV1PreprocessGuard,
+    "PoseAndFaceDetection": PoseAndFaceDetection,
     "DrawViTPose": DrawViTPose,
     "PoseRetargetPromptHelper": PoseRetargetPromptHelper,
     "PoseDetectionOneToAllAnimation": PoseDetectionOneToAllAnimation,
@@ -586,8 +628,8 @@ NODE_CLASS_MAPPINGS = {
 NODE_DISPLAY_NAME_MAPPINGS = {
     "OnnxDetectionModelLoader": "ONNX Detection Model Loader",
     "WanAnimateV1Preprocess": "WanAnimate V1 Preprocess",
-    "PoseAndFaceDetection": "WanAnimate V1 Preprocess",
     "WanAnimateV1PreprocessGuard": "WanAnimate V1 Preprocess Guard (beta)",
+    "PoseAndFaceDetection": "Pose and Face Detection",
     "DrawViTPose": "Draw ViT Pose",
     "PoseRetargetPromptHelper": "Pose Retarget Prompt Helper",
     "PoseDetectionOneToAllAnimation": "Pose Detection OneToAll Animation",

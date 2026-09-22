@@ -1,7 +1,15 @@
 ## ComfyUI helper nodes for [Wan video 2.2 Animate preprocessing](https://github.com/Wan-Video/Wan2.2/tree/main/wan/modules/animate/preprocess)
 
 
-Nodes to run the ViTPose model, get face crops and keypoint list for SAM2 segmentation.
+Nodes to run the ViTPose model, get face crops, keypoints, the person mask and the pose
+images for Wan Animate.
+
+`WanAnimate V1 Preprocess` does the whole preprocess in one node: pick the ViTPose, YOLO
+and SAM3 models in its widgets (the defaults are downloaded on first use), feed it the
+frames and get `pose_images`, `pose_data`, `face_images`, `key_frame_body_points`,
+`bboxes`, `face_bboxes` and `mask`. Put `WanAnimate V1 Preprocess Guard (beta)` after it
+to stop the workflow when the pose or the mask looks wrong. The older three-node layout
+(`ONNX Detection Model Loader` → `Pose and Face Detection` → `Draw ViT Pose`) still works.
 
 The ONNX models are run with torch, on whatever device ComfyUI runs on (CUDA, ROCm, MPS
 or CPU). There is no onnxruntime dependency, so nothing has to match the CUDA version
@@ -11,8 +19,8 @@ back for the next run.
 
 Models:
 
-The model loader lists `yolov10x.onnx` and `vitpose_h_wholebody_model.onnx` even before
-they exist and downloads them into `ComfyUI/models/detection` the first time a workflow
+The model widgets list `yolov10x.onnx` and `vitpose_h_wholebody_model.onnx` even before
+they exist and download them into `ComfyUI/models/detection` the first time a workflow
 runs with them selected (about 2.7 GB in total). To place them yourself, use the same
 links and names:
 
@@ -32,8 +40,8 @@ https://huggingface.co/Kijai/vitpose_comfy/tree/main/onnx
 
 ### Person mask (SAM 3 / 3.1)
 
-`WanAnimate V1 Preprocess` (the node formerly called `Pose and Face Detection`; saved
-workflows keep loading) has a `sam3_model` choice and a `mask` output. With
+`WanAnimate V1 Preprocess` (and the older `Pose and Face Detection`) has a `sam3_model`
+choice and a `mask` output. With
 `sam3.1_multiplex_fp16.safetensors` selected (downloaded into `ComfyUI/models/checkpoints`
 on first use, from [Comfy-Org/sam3.1](https://huggingface.co/Comfy-Org/sam3.1)), every
 frame's person is segmented by ComfyUI's own SAM3 implementation from that frame's
