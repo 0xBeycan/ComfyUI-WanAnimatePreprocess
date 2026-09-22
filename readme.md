@@ -11,7 +11,10 @@ back for the next run.
 
 Models:
 
-to `ComfyUI/models/detection` (subject to change in the future)
+The model loader lists `yolov10x.onnx` and `vitpose_h_wholebody_model.onnx` even before
+they exist and downloads them into `ComfyUI/models/detection` the first time a workflow
+runs with them selected (about 2.7 GB in total). To place them yourself, use the same
+links and names:
 
 YOLO:
 

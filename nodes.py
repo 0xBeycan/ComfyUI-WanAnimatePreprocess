@@ -32,6 +32,64 @@ if _detection_exts and ".onnx" not in _detection_exts:
         _cache_helper.clear()
 
 from .models.onnx_models import ViTPose, Yolo, load_models
+
+# The models the example workflow uses, fetched on first use when they are not in
+# models/detection. Each entry lists every file the model needs.
+DEFAULT_VITPOSE = "vitpose_h_wholebody_model.onnx"
+DEFAULT_YOLO = "yolov10x.onnx"
+DEFAULT_MODELS = {
+    DEFAULT_VITPOSE: (
+        ("vitpose_h_wholebody_model.onnx", "https://huggingface.co/Kijai/vitpose_comfy/resolve/main/onnx/vitpose_h_wholebody_model.onnx"),
+        ("vitpose_h_wholebody_data.bin", "https://huggingface.co/Kijai/vitpose_comfy/resolve/main/onnx/vitpose_h_wholebody_data.bin"),
+    ),
+    DEFAULT_YOLO: (
+        ("yolov10x.onnx", "https://huggingface.co/onnx-community/yolov10x/resolve/main/onnx/model.onnx"),
+    ),
+}
+
+
+def detection_model_choices():
+    """Files in models/detection plus the defaults, which are listed before they exist so a
+    workflow can select them and have them downloaded on its first run."""
+    return sorted(set(folder_paths.get_filename_list("detection")) | set(DEFAULT_MODELS))
+
+
+def download(url, path):
+    """Stream `url` to `path` through a .part file, so an interrupted download never leaves
+    a truncated model behind."""
+    import urllib.request
+
+    name = os.path.basename(path)
+    logging.info(f"[WanAnimatePreprocess] downloading {name} from {url}")
+    part = path + ".part"
+    try:
+        request = urllib.request.Request(url, headers={"User-Agent": "ComfyUI-WanAnimatePreprocess"})
+        with urllib.request.urlopen(request) as response, open(part, "wb") as out:
+            total = int(response.headers.get("Content-Length") or 0)
+            comfy_pbar = ProgressBar(total) if total else None
+            with tqdm(total=total or None, unit="B", unit_scale=True, desc=name) as pbar:
+                for chunk in iter(lambda: response.read(1 << 20), b""):
+                    out.write(chunk)
+                    pbar.update(len(chunk))
+                    if comfy_pbar is not None:
+                        comfy_pbar.update_absolute(pbar.n)
+    except Exception as e:
+        raise RuntimeError(f"Could not download {name} from {url} ({e}). Download it by hand to {path}") from e
+    os.replace(part, path)
+
+
+def detection_model_path(name):
+    """Full path of a model in models/detection; a default model that is missing (or missing
+    one of its files) is downloaded first, next to the .onnx if that already exists."""
+    files = DEFAULT_MODELS.get(name, ())
+    if files:
+        found = folder_paths.get_full_path("detection", name)
+        target_dir = os.path.dirname(found) if found else _detection_path
+        os.makedirs(target_dir, exist_ok=True)
+        for filename, url in files:
+            if not os.path.isfile(os.path.join(target_dir, filename)):
+                download(url, os.path.join(target_dir, filename))
+    return folder_paths.get_full_path_or_raise("detection", name)
 from .pose_utils.pose2d_utils import load_pose_metas_from_kp2ds_seq, crop, bbox_from_detector
 from .utils import get_face_bboxes, padding_resize, resize_by_area, resize_to_bounds
 from .pose_utils.human_visualization import AAPoseMeta, draw_aapose_by_meta_new
@@ -42,8 +100,8 @@ class OnnxDetectionModelLoader:
     def INPUT_TYPES(s):
         return {
             "required": {
-                "vitpose_model": (folder_paths.get_filename_list("detection"), {"tooltip": "These models are loaded from the 'ComfyUI/models/detection' -folder",}),
-                "yolo_model": (folder_paths.get_filename_list("detection"), {"tooltip": "These models are loaded from the 'ComfyUI/models/detection' -folder",}),
+                "vitpose_model": (detection_model_choices(), {"default": DEFAULT_VITPOSE, "tooltip": f"Loaded from the 'ComfyUI/models/detection' folder; {DEFAULT_VITPOSE} is downloaded on first use when missing",}),
+                "yolo_model": (detection_model_choices(), {"default": DEFAULT_YOLO, "tooltip": f"Loaded from the 'ComfyUI/models/detection' folder; {DEFAULT_YOLO} is downloaded on first use when missing",}),
             },
         }
 
@@ -55,8 +113,8 @@ class OnnxDetectionModelLoader:
 
     def loadmodel(self, vitpose_model, yolo_model):
 
-        vitpose_model_path = folder_paths.get_full_path_or_raise("detection", vitpose_model)
-        yolo_model_path = folder_paths.get_full_path_or_raise("detection", yolo_model)
+        vitpose_model_path = detection_model_path(vitpose_model)
+        yolo_model_path = detection_model_path(yolo_model)
 
         vitpose = ViTPose(vitpose_model_path)
         yolo = Yolo(yolo_model_path)
