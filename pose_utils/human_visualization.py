@@ -94,12 +94,12 @@ def draw_handpose_new(canvas, keypoints, stickwidth_type='v2', hand_score_th=0.6
     return canvas
 
 
-def draw_aapose_by_meta_new(img, meta: AAPoseMeta, threshold=0.5, stickwidth_type='v2', body_stick_width=-1, draw_hand=True, draw_head=True, hand_stick_width=4):
+def draw_aapose_by_meta_new(img, meta: AAPoseMeta, threshold=0.5, stickwidth_type='v2', body_stick_width=-1, draw_hand=True, draw_head=True, hand_stick_width=4, draw_body=True):
     kp2ds = np.concatenate([meta.kps_body, meta.kps_body_p[:, None]], axis=1)
     kp2ds_lhand = np.concatenate([meta.kps_lhand, meta.kps_lhand_p[:, None]], axis=1)
     kp2ds_rhand = np.concatenate([meta.kps_rhand, meta.kps_rhand_p[:, None]], axis=1)
     pose_img = draw_aapose_new(img, kp2ds, threshold, kp2ds_lhand=kp2ds_lhand, kp2ds_rhand=kp2ds_rhand, body_stick_width=body_stick_width,
-                               stickwidth_type=stickwidth_type, draw_hand=draw_hand, draw_head=draw_head, hand_stick_width=hand_stick_width)
+                               stickwidth_type=stickwidth_type, draw_hand=draw_hand, draw_head=draw_head, hand_stick_width=hand_stick_width, draw_body=draw_body)
     return pose_img
 
 
@@ -115,7 +115,8 @@ def draw_aapose_new(
     stickwidth_type='v2',
     body_stick_width=-1,
     hand_stick_width=-1,
-    draw_head=True
+    draw_head=True,
+    draw_body=True
 ):
     """
     Draw keypoints and connections representing hand pose on a given canvas.
@@ -157,6 +158,8 @@ def draw_aapose_new(
     # kp2ds_body = (kp2ds.copy()[[0, 6, 6, 8, 10, 5, 7, 9, 12, 14, 16, 11, 13, 15, 2, 1, 4, 3, 17, 20]] + \
     #              kp2ds.copy()[[0, 5, 6, 8, 10, 5, 7, 9, 12, 14, 16, 11, 13, 15, 2, 1, 4, 3, 18, 21]]) / 2
     kp2ds = kp2ds.copy()
+    if not draw_body:
+        kp2ds[:, 2] = 0
     if not draw_head:
         kp2ds[[0,14,15,16,17], 2] = 0
     kp2ds_body = kp2ds

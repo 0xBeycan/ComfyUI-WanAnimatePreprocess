@@ -71,7 +71,8 @@ def main():
     net = net.eval().to(args.device)
     if args.fp16:
         net = net.half()
-    dtype = next(net.parameters()).dtype
+    # same rule as models/onnx_models.py: the executor runs the graph's own Cast nodes
+    dtype = next(net.parameters()).dtype if (kind.startswith("native") or args.fp16) else graph.input_dtypes[graph.inputs[0]]
     print(f"{os.path.basename(args.model)}: {kind}, opset {graph.opset}, {len(graph.nodes)} nodes, "
           f"built in {time.time() - t0:.1f}s, torch {args.device} {dtype}")
 

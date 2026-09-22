@@ -18,7 +18,7 @@ folder_paths.add_model_folder_path("detection", _detection_path)
 _paths, _exts = folder_paths.folder_names_and_paths["detection"]
 if _exts and ".onnx" not in _exts:
     folder_paths.folder_names_and_paths["detection"] = (_paths, set(_exts) | {".onnx"})
-    folder_paths.filename_list_cache.pop("detection", None)
+    getattr(folder_paths, "filename_list_cache", {}).pop("detection", None)
 
 # The default models, fetched on first use when they are not in models/detection. Each
 # entry lists every file the model needs.

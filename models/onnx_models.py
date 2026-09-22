@@ -25,8 +25,13 @@ class OnnxModel:
         if len(graph.inputs) != 1 or len(graph.outputs) != 1:
             raise ValueError(f"{checkpoint} has {len(graph.inputs)} inputs and {len(graph.outputs)} outputs; "
                              "the detection models take one image and return one tensor")
-        self.input_dtype = graph.input_dtypes[graph.inputs[0]]
-        self.net = (build_vitpose(graph) or GraphModule(graph)).eval()
+        native = build_vitpose(graph)
+        self.net = (native or GraphModule(graph)).eval()
+        # the graph executor runs the model's own Cast nodes, so it takes the declared input
+        # type; the native ViTPose module skips them and takes its weights' type
+        self.input_dtype = graph.input_dtypes[graph.inputs[0]] if native is None else next(self.net.parameters()).dtype
+        if not self.input_dtype.is_floating_point:
+            raise ValueError(f"{checkpoint} takes {self.input_dtype} input; the detection models are fed float images")
         self.patcher = ModelPatcher(self.net, load_device=mm.get_torch_device(), offload_device=mm.unet_offload_device())
 
     def __call__(self, *args, **kwargs):

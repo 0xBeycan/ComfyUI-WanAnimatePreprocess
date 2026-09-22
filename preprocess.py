@@ -1,7 +1,5 @@
 """The Wan Animate preprocess, frame by frame: person box (YOLO), body / hand / face
 keypoints (ViTPose), face crops, the person mask (SAM3) and the drawn pose images."""
-import copy
-
 import cv2
 import numpy as np
 import torch
@@ -45,8 +43,13 @@ def detect(detector, pose_model, images, face_padding=0, sam3_model="none"):
     with log.step(f"detecting the person on {B} frames", result):
         for i, img in enumerate(tqdm(images_np, desc="Detecting bboxes")):
             detection = detector(cv2.resize(img, (640, 640)).transpose(2, 0, 1)[None], shape)[0][0]
-            bboxes.append(detection["bbox"])
-            person_counts.append(detection.get("person_count", 0))
+            bbox, count = detection["bbox"], detection.get("person_count", 0)
+            if bbox[-1] <= 0 or (bbox[2] - bbox[0]) < 10 or (bbox[3] - bbox[1]) < 10:
+                # nothing usable detected: the pose, the mask prompt and the guard all see the
+                # whole frame as the box, marked undetected
+                bbox, count = np.array([0.0, 0.0, W, H, -1.0]), 0
+            bboxes.append(bbox)
+            person_counts.append(count)
             pbar.update_absolute(i + 1)
         result["frames without a person"] = sum(1 for b in bboxes if b[-1] <= 0)
         result["frames with several people"] = sum(1 for n in person_counts if n > 1)
@@ -54,10 +57,6 @@ def detect(detector, pose_model, images, face_padding=0, sam3_model="none"):
     kp2ds = []
     with log.step(f"extracting keypoints on {B} frames"):
         for i, (img, bbox) in enumerate(tqdm(zip(images_np, bboxes), total=B, desc="Extracting keypoints")):
-            if bbox[-1] <= 0 or (bbox[2] - bbox[0]) < 10 or (bbox[3] - bbox[1]) < 10:
-                # nothing usable detected: the pose, the mask prompt and the guard all see the
-                # whole frame as the box, marked undetected
-                bbox = bboxes[i] = np.array([0.0, 0.0, W, H, -1.0])
             center, scale = bbox_from_detector(bbox, POSE_INPUT_RESOLUTION, rescale=POSE_CROP_RESCALE)
             img = crop(img, center, scale, POSE_INPUT_RESOLUTION)[0]
             img_norm = ((img - IMG_NORM_MEAN) / IMG_NORM_STD).transpose(2, 0, 1).astype(np.float32)
@@ -115,12 +114,9 @@ def draw(pose_data, body_stick_width=-1, hand_stick_width=-1, draw_head=True):
     pose_images = []
     with log.step(f"drawing {len(pose_metas)} pose images"):
         for i, meta in enumerate(tqdm(pose_metas, desc="Drawing pose images")):
-            if body_stick_width == 0:
-                meta = copy.copy(meta)
-                meta.kps_body_p = np.zeros_like(meta.kps_body_p)
             canvas = np.zeros((meta.height, meta.width, 3), dtype=np.uint8)
-            image = draw_aapose_by_meta_new(canvas, meta, draw_hand=hand_stick_width != 0, draw_head=draw_head,
-                                            body_stick_width=body_stick_width, hand_stick_width=hand_stick_width)
+            image = draw_aapose_by_meta_new(canvas, meta, draw_body=body_stick_width != 0, draw_hand=hand_stick_width != 0,
+                                            draw_head=draw_head, body_stick_width=body_stick_width, hand_stick_width=hand_stick_width)
             pose_images.append(image)
             pbar.update_absolute(i + 1)
     return torch.from_numpy(np.stack(pose_images, 0)).float() / 255.0

@@ -101,10 +101,13 @@ class OnnxGraph:
             i.name: [d.dim_value if d.dim_value else d.dim_param for d in i.type.tensor_type.shape.dim]
             for i in model.graph.input if i.name in self.inputs
         }
-        self.input_dtypes = {
-            i.name: _DTYPES.get(i.type.tensor_type.elem_type, torch.float32)
-            for i in model.graph.input if i.name in self.inputs
-        }
+        self.input_dtypes = {}
+        for i in model.graph.input:
+            if i.name in self.inputs:
+                if i.type.tensor_type.elem_type not in _DTYPES:
+                    raise ValueError(f"{os.path.basename(path)}: input {i.name} has an unsupported tensor type "
+                                     f"({i.type.tensor_type.elem_type})")
+                self.input_dtypes[i.name] = _DTYPES[i.type.tensor_type.elem_type]
 
     def producer(self, name):
         for n in self.nodes:
@@ -147,7 +150,6 @@ def _same_pad(size, kernel, stride, dilation, lower):
 
 QUANTIZED_OPS = {"QuantizeLinear", "DequantizeLinear", "DynamicQuantizeLinear", "QLinearConv", "QLinearMatMul",
                  "MatMulInteger", "ConvInteger"}
-CONTROL_FLOW_OPS = {"If", "Loop", "Scan"}
 RESIZE_MODES = {("nearest", "asymmetric", "floor"), ("nearest", "half_pixel", "round_prefer_floor"),
                 ("nearest", "half_pixel", "round_prefer_ceil"), ("nearest", "pytorch_half_pixel", "round_prefer_floor"),
                 ("nearest", "pytorch_half_pixel", "round_prefer_ceil")}
@@ -178,7 +180,7 @@ class GraphModule(nn.Module):
         quantized = sorted({n.op for n in graph.nodes if n.op in QUANTIZED_OPS})
         if quantized:
             raise ValueError(f"{name} is a quantized ONNX export ({', '.join(quantized)}); use the fp32 or fp16 model")
-        missing = sorted({n.op for n in graph.nodes if n.op in CONTROL_FLOW_OPS or not hasattr(self, "op_" + n.op)})
+        missing = sorted({n.op for n in graph.nodes if not hasattr(self, "op_" + n.op)})
         if missing:
             raise ValueError(f"{name} uses ONNX ops this loader does not implement: {', '.join(missing)}")
         for n in graph.nodes:
@@ -237,6 +239,9 @@ class GraphModule(nn.Module):
         if node.op == "Resize":
             mode = a.get("mode", "nearest")
             coord = a.get("coordinate_transformation_mode", "half_pixel")
+            if self.opset < 11:
+                # opset 10 Resize has no coordinate attributes: nearest is asymmetric / floor
+                return None if mode == "nearest" else f"resizes with {mode} at opset 10, which is not supported"
             if "axes" in a:
                 return "uses the axes attribute, which is not supported"
             if mode == "nearest" and (mode, coord, a.get("nearest_mode", "round_prefer_floor")) not in RESIZE_MODES:
@@ -923,11 +928,11 @@ class GraphModule(nn.Module):
 
     def op_Resize(self, node, x, roi=None, scales=None, sizes=None):
         if self.opset < 11:
-            scales, sizes = roi, None  # opset 10: (X, scales)
-        scales = None if scales is None or scales.numel() == 0 else [float(s) for s in self._value(node, 2 if self.opset >= 11 else 1, scales)]
+            # opset 10: inputs (X, scales), nearest with asymmetric coordinates and floor
+            scales = [float(s) for s in self._value(node, 1, roi)]
+            return self._interpolate(node, x, "nearest", "asymmetric", "floor", scales, None, False)
+        scales = None if scales is None or scales.numel() == 0 else [float(s) for s in self._value(node, 2, scales)]
         sizes = None if sizes is None or sizes.numel() == 0 else self._ints(node, 3, sizes)
-        if "axes" in node.attrs:
-            raise ValueError(f"Resize {node.name}: the axes attribute is not supported")
         return self._interpolate(node, x, node.attrs.get("mode", "nearest"),
                                  node.attrs.get("coordinate_transformation_mode", "half_pixel"),
                                  node.attrs.get("nearest_mode", "round_prefer_floor"),

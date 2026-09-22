@@ -136,3 +136,23 @@ def test_frame_count_mismatch_is_an_error():
     masks, pose_data = clip()
     with pytest.raises(ValueError):
         guard.run_guard(masks[:5], pose_data, THRESHOLDS, True, True)
+
+
+def test_foreign_pose_data_is_an_error():
+    masks, _ = clip()
+    with pytest.raises(ValueError, match="WanAnimate Preprocess"):
+        guard.run_guard(masks, {"something": 1}, THRESHOLDS, True, True)
+
+
+def test_resized_mask_is_an_error():
+    masks, pose_data = clip()
+    small = torch.nn.functional.interpolate(masks[None], size=(H // 2, W // 2))[0]
+    with pytest.raises(ValueError, match="before any resize"):
+        guard.run_guard(small, pose_data, THRESHOLDS, True, True)
+
+
+def test_single_frame_2d_mask_is_accepted():
+    masks, pose_data = clip()
+    pose_data = {"pose_metas_original": pose_data["pose_metas_original"][:1], "detections": pose_data["detections"][:1]}
+    passed, flags, _ = run(masks[0], pose_data)
+    assert passed

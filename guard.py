@@ -263,6 +263,10 @@ def timeline_image(rows, flags):
 
 
 def run_guard(mask, pose_data, thresholds, pose_guard, mask_guard):
+    if mask.dim() == 2:
+        mask = mask.unsqueeze(0)
+    if mask.dim() != 3:
+        raise ValueError(f"mask must be [frames, height, width], got a tensor of shape {tuple(mask.shape)}")
     masks = (mask.cpu().numpy() > 0.5)
     pose_metas = pose_data.get("pose_metas_original") if isinstance(pose_data, dict) else None
     detections = pose_data.get("detections") if isinstance(pose_data, dict) else None

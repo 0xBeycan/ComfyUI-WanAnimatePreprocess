@@ -75,41 +75,54 @@ def load_sam3(name):
     return model
 
 
+def has_fast_path(sam3):
+    """Whether this ComfyUI's SAM3 exposes the pieces `decode` needs to run the image
+    encoder once per frame; decided once per model, and logged, so a core change falls
+    back to the public two-pass path rather than failing mid-run."""
+    if not hasattr(sam3, "_wanpre_fast_path"):
+        bb = getattr(getattr(sam3, "detector", None), "backbone", {})
+        ok = (isinstance(bb, (dict, torch.nn.ModuleDict)) and "vision_backbone" in bb
+              and hasattr(bb["vision_backbone"], "multiplex") and hasattr(sam3.detector, "scalp")
+              and hasattr(sam3, "tracker") and hasattr(sam3.tracker, "_forward_sam_heads"))
+        if not ok:
+            log.warning("this ComfyUI's SAM3 internals differ; running the image encoder twice per frame")
+        sam3._wanpre_fast_path = ok
+    return sam3._wanpre_fast_path
+
+
 def decode(sam3, frame, point_inputs, box_inputs, refine):
     """Mask logits for one 1008x1008 frame from box / point prompts, with an optional
     refinement pass that feeds the first mask back to the decoder. This is SAM3Model.
     forward_segment with the image encoder run once: its features do not depend on the
     prompt, so the second pass only runs the SAM heads instead of the whole network."""
-    try:
-        bb = sam3.detector.backbone["vision_backbone"]
-        if bb.multiplex:
-            _, _, feats, _ = bb(frame, tracker_mode="interactive")
-        else:
-            _, _, feats, _ = bb(frame, need_tracker=True)
-            if sam3.detector.scalp > 0:
-                feats = feats[:-sam3.detector.scalp]
-        high_res, backbone_feat = list(feats[:-1]), feats[-1]
-        tracker = sam3.tracker
-        no_mem = getattr(tracker, "interactivity_no_mem_embed", None)
-        if no_mem is None:
-            no_mem = getattr(tracker, "no_mem_embed", None)
-        if no_mem is not None:
-            B, C, H, W = backbone_feat.shape
-            flat = backbone_feat.flatten(2).permute(0, 2, 1)
-            backbone_feat = (flat + cast_to_input(no_mem, flat)).view(B, H, W, C).permute(0, 3, 1, 2)
-        num_pts = 0 if point_inputs is None else point_inputs["point_labels"].size(1)
-        _, logits, _, _ = tracker._forward_sam_heads(
-            backbone_features=backbone_feat, point_inputs=point_inputs, mask_inputs=None, box_inputs=box_inputs,
-            high_res_features=high_res, multimask_output=(0 < num_pts <= 1))
-        if refine:
-            _, logits, _, _ = tracker._forward_sam_heads(
-                backbone_features=backbone_feat, point_inputs=None, mask_inputs=logits, box_inputs=None,
-                high_res_features=high_res, multimask_output=False)
-        return logits
-    except (AttributeError, KeyError, TypeError):
-        # the internals above moved in this ComfyUI version: take the public path, one encoder pass per call
+    if not has_fast_path(sam3):
         logits = sam3.forward_segment(frame, point_inputs=point_inputs, box_inputs=box_inputs)
         return sam3.forward_segment(frame, mask_inputs=logits) if refine else logits
+    bb = sam3.detector.backbone["vision_backbone"]
+    if bb.multiplex:
+        _, _, feats, _ = bb(frame, tracker_mode="interactive")
+    else:
+        _, _, feats, _ = bb(frame, need_tracker=True)
+        if sam3.detector.scalp > 0:
+            feats = feats[:-sam3.detector.scalp]
+    high_res, backbone_feat = list(feats[:-1]), feats[-1]
+    tracker = sam3.tracker
+    no_mem = getattr(tracker, "interactivity_no_mem_embed", None)
+    if no_mem is None:
+        no_mem = getattr(tracker, "no_mem_embed", None)
+    if no_mem is not None:
+        B, C, H, W = backbone_feat.shape
+        flat = backbone_feat.flatten(2).permute(0, 2, 1)
+        backbone_feat = (flat + cast_to_input(no_mem, flat)).view(B, H, W, C).permute(0, 3, 1, 2)
+    num_pts = 0 if point_inputs is None else point_inputs["point_labels"].size(1)
+    _, logits, _, _ = tracker._forward_sam_heads(
+        backbone_features=backbone_feat, point_inputs=point_inputs, mask_inputs=None, box_inputs=box_inputs,
+        high_res_features=high_res, multimask_output=(0 < num_pts <= 1))
+    if refine:
+        _, logits, _, _ = tracker._forward_sam_heads(
+            backbone_features=backbone_feat, point_inputs=None, mask_inputs=logits, box_inputs=None,
+            high_res_features=high_res, multimask_output=False)
+    return logits
 
 
 def segment_frames(model, images, bboxes, pose_metas, refine=True):
