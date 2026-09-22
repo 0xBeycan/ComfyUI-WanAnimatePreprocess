@@ -288,7 +288,7 @@ class PoseAndFaceDetection:
 
         return (pose_data, face_images_tensor, json.dumps(points_dict_list), [bbox_ints], face_bboxes, mask)
 
-class WanAnimateV1Preprocess:
+class WanAnimatePreprocess:
     @classmethod
     def INPUT_TYPES(s):
         return {
@@ -310,8 +310,8 @@ class WanAnimateV1Preprocess:
             },
         }
 
-    RETURN_TYPES = ("IMAGE", "POSEDATA", "IMAGE", "STRING", "BBOX", "BBOX,", "MASK")
-    RETURN_NAMES = ("pose_images", "pose_data", "face_images", "key_frame_body_points", "bboxes", "face_bboxes", "mask")
+    RETURN_TYPES = ("IMAGE", "IMAGE", "MASK", "POSEDATA")
+    RETURN_NAMES = ("pose_images", "face_images", "mask", "pose_data")
     FUNCTION = "process"
     CATEGORY = "WanAnimatePreprocess"
     DESCRIPTION = "The whole WanAnimate preprocess in one node: loads the selected ViTPose, YOLO and SAM3 models (downloading the defaults when missing), detects the person's pose and face on every frame, segments the person from its bbox and keypoints, optionally retargets the pose to a reference image, and draws the pose images."
@@ -319,13 +319,13 @@ class WanAnimateV1Preprocess:
     def process(self, images, vitpose_model, yolo_model, sam3_model, width, height, retarget_padding, body_stick_width,
                 hand_stick_width, draw_head, retarget_image=None, face_padding=0):
         model = load_detection_models(vitpose_model, yolo_model)
-        pose_data, face_images, key_points, bboxes, face_bboxes, mask = PoseAndFaceDetection().process(
+        pose_data, face_images, _, _, _, mask = PoseAndFaceDetection().process(
             model, images, width, height, retarget_image=retarget_image, face_padding=face_padding, sam3_model=sam3_model)
         pose_images = DrawViTPose().process(pose_data, width, height, body_stick_width, hand_stick_width, draw_head, retarget_padding)[0]
-        return (pose_images, pose_data, face_images, key_points, bboxes, face_bboxes, mask)
+        return (pose_images, face_images, mask, pose_data)
 
 
-class WanAnimateV1PreprocessGuard:
+class WanAnimatePreprocessGuard:
     @classmethod
     def INPUT_TYPES(s):
         return {
@@ -348,7 +348,7 @@ class WanAnimateV1PreprocessGuard:
     RETURN_NAMES = ("pose_data", "mask", "report", "metrics", "timeline")
     FUNCTION = "check"
     CATEGORY = "WanAnimatePreprocess"
-    DESCRIPTION = "Beta. Checks the pose and the mask of WanAnimate V1 Preprocess frame by frame (missing detections, pose glitches, empty / leaking / fragmented masks, keypoints outside the mask, unstable masks). Wire it between the preprocess and the sampler: a failed check of an enabled guard stops the workflow with the report; 'metrics' has every measurement per frame and 'timeline' plots them."
+    DESCRIPTION = "Beta. Checks the pose and the mask of WanAnimate Preprocess frame by frame (missing detections, pose glitches, empty / leaking / fragmented masks, keypoints outside the mask, unstable masks). Wire it between the preprocess and the sampler: a failed check of an enabled guard stops the workflow with the report; 'metrics' has every measurement per frame and 'timeline' plots them."
 
     def check(self, pose_data, mask, pose_guard, mask_guard, min_keypoint_conf, min_pose_conf, max_torso_jump,
               min_mask_to_box, max_mask_outside_box, min_keypoint_recall, min_mask_iou):
@@ -618,8 +618,8 @@ class PoseDetectionOneToAllAnimation:
 
 NODE_CLASS_MAPPINGS = {
     "OnnxDetectionModelLoader": OnnxDetectionModelLoader,
-    "WanAnimateV1Preprocess": WanAnimateV1Preprocess,
-    "WanAnimateV1PreprocessGuard": WanAnimateV1PreprocessGuard,
+    "WanAnimatePreprocess": WanAnimatePreprocess,
+    "WanAnimatePreprocessGuard": WanAnimatePreprocessGuard,
     "PoseAndFaceDetection": PoseAndFaceDetection,
     "DrawViTPose": DrawViTPose,
     "PoseRetargetPromptHelper": PoseRetargetPromptHelper,
@@ -627,8 +627,8 @@ NODE_CLASS_MAPPINGS = {
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "OnnxDetectionModelLoader": "ONNX Detection Model Loader",
-    "WanAnimateV1Preprocess": "WanAnimate V1 Preprocess",
-    "WanAnimateV1PreprocessGuard": "WanAnimate V1 Preprocess Guard (beta)",
+    "WanAnimatePreprocess": "WanAnimate Preprocess",
+    "WanAnimatePreprocessGuard": "WanAnimate Preprocess Guard (beta)",
     "PoseAndFaceDetection": "Pose and Face Detection",
     "DrawViTPose": "Draw ViT Pose",
     "PoseRetargetPromptHelper": "Pose Retarget Prompt Helper",

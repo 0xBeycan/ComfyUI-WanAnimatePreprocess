@@ -244,7 +244,7 @@ def run_guard(mask, pose_data, thresholds, pose_guard, mask_guard):
     pose_metas = pose_data["pose_metas_original"]
     detections = pose_data.get("detections")
     if detections is None:
-        raise ValueError("pose_data has no per-frame detections; it must come from WanAnimate V1 Preprocess")
+        raise ValueError("pose_data has no per-frame detections; it must come from WanAnimate Preprocess")
     if len(pose_metas) != masks.shape[0] or len(detections) != masks.shape[0]:
         raise ValueError(f"mask has {masks.shape[0]} frames, pose_data {len(pose_metas)}; connect the outputs of the same node")
     rows = frame_metrics(masks, pose_metas, detections, thresholds["min_keypoint_conf"])

@@ -4,10 +4,10 @@
 Nodes to run the ViTPose model, get face crops, keypoints, the person mask and the pose
 images for Wan Animate.
 
-`WanAnimate V1 Preprocess` does the whole preprocess in one node: pick the ViTPose, YOLO
+`WanAnimate Preprocess` does the whole preprocess in one node: pick the ViTPose, YOLO
 and SAM3 models in its widgets (the defaults are downloaded on first use), feed it the
-frames and get `pose_images`, `pose_data`, `face_images`, `key_frame_body_points`,
-`bboxes`, `face_bboxes` and `mask`. Put `WanAnimate V1 Preprocess Guard (beta)` after it
+frames and get `pose_images`, `face_images`, `mask` and `pose_data` (for the guard). Put
+`WanAnimate Preprocess Guard (beta)` after it
 to stop the workflow when the pose or the mask looks wrong. The older three-node layout
 (`ONNX Detection Model Loader` → `Pose and Face Detection` → `Draw ViT Pose`) still works.
 
@@ -40,7 +40,7 @@ https://huggingface.co/Kijai/vitpose_comfy/tree/main/onnx
 
 ### Person mask (SAM 3 / 3.1)
 
-`WanAnimate V1 Preprocess` (and the older `Pose and Face Detection`) has a `sam3_model`
+`WanAnimate Preprocess` (and the older `Pose and Face Detection`) has a `sam3_model`
 choice and a `mask` output. With
 `sam3.1_multiplex_fp16.safetensors` selected (downloaded into `ComfyUI/models/checkpoints`
 on first use, from [Comfy-Org/sam3.1](https://huggingface.co/Comfy-Org/sam3.1)), every
@@ -52,7 +52,7 @@ smaller than the main region are dropped. With `none` the mask output is empty.
 
 ### Preprocess guard (beta)
 
-`WanAnimate V1 Preprocess Guard (beta)` sits between the preprocess node and the
+`WanAnimate Preprocess Guard (beta)` sits between the preprocess node and the
 sampler: it takes `pose_data` and `mask`, passes both through, and stops the workflow
 with a report when the pose or the mask looks wrong, because sampling on a bad mask or
 pose is wasted. Every check is normalised by the detected person's size and crosses the
