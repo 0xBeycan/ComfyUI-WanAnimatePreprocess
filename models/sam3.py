@@ -31,6 +31,12 @@ SAM3_SIZE = 1008
 # Body keypoints used as positive points: nose, neck, both shoulders, both hips and both
 # ankles in the body layout (see guard.BODY_NAMES).
 PROMPT_KEYPOINTS = (0, 1, 2, 5, 8, 11, 10, 13)
+NOSE, NECK, R_SHOULDER, L_SHOULDER, R_HIP, L_HIP = 0, 1, 2, 5, 8, 11
+# Keypoints sit on joints, so dark low-texture clothing between them carries no positive
+# evidence and the decoder drops parts of it (a close-up lost the lower half of a jacket).
+# These fractions down the shoulder-to-hip line, or below the shoulders when the hips are
+# out of frame, put points on the clothing itself.
+TORSO_FRACTIONS = (0.35, 0.65)
 MIN_KEYPOINT_CONF = 0.3
 # The previous frame's mask is given to the decoder as a prior alongside the box and the
 # points: on a close-up, where the person fills the frame and the boundary is ambiguous,
@@ -50,6 +56,35 @@ def drop_islands(mask):
     areas = stats[1:, cv2.CC_STAT_AREA]
     keep = np.flatnonzero(areas >= areas.max() * MIN_ISLAND_FRACTION) + 1
     return np.isin(labels, keep).astype(np.uint8)
+
+
+def fill_holes(mask):
+    """Fill background regions the mask fully encloses: a person has no holes, so a hole is
+    clothing or hair the decoder dropped."""
+    count, labels, stats, _ = cv2.connectedComponentsWithStats((mask == 0).astype(np.uint8), connectivity=4)
+    if count <= 2:
+        return mask
+    H, W = mask.shape
+    out = mask.copy()
+    for i in range(1, count):
+        x, y, w, h, area = stats[i]
+        if x > 0 and y > 0 and x + w < W and y + h < H:   # does not touch the frame border
+            out[labels == i] = 1
+    return out
+
+
+def torso_points(kps, threshold):
+    """Points on the clothing between the shoulders and the hips, in normalised coordinates."""
+    if kps[R_SHOULDER][2] <= threshold or kps[L_SHOULDER][2] <= threshold:
+        return []
+    shoulder = ((kps[R_SHOULDER][0] + kps[L_SHOULDER][0]) / 2, (kps[R_SHOULDER][1] + kps[L_SHOULDER][1]) / 2)
+    hips = [kps[i] for i in (R_HIP, L_HIP) if kps[i][2] > threshold]
+    if hips:
+        hip = (sum(h[0] for h in hips) / len(hips), sum(h[1] for h in hips) / len(hips))
+        return [(shoulder[0] + t * (hip[0] - shoulder[0]), shoulder[1] + t * (hip[1] - shoulder[1])) for t in TORSO_FRACTIONS]
+    # the hips are out of frame: step down from the shoulders by their own width
+    span = abs(kps[R_SHOULDER][0] - kps[L_SHOULDER][0]) or 0.15
+    return [(shoulder[0], min(shoulder[1] + t * span, 0.99)) for t in (1.0, 2.0)]
 
 
 _loaded = {"name": None, "model": None}
@@ -139,7 +174,8 @@ def segment_frames(model, images, bboxes, pose_metas, refine=True, temporal=True
     nothing was detected. `pose_metas[i]["keypoints_body"]` are its body keypoints,
     normalised to the frame, with confidence. A frame with neither a box nor a confident
     keypoint gets an empty mask. With `temporal`, the previous frame's mask is carried into
-    the decoder as a prior, which keeps an ambiguous boundary from flickering."""
+    the decoder as a prior, which keeps an ambiguous boundary from flickering. Holes the
+    mask encloses are filled and islands far smaller than the person are dropped."""
     N, H, W, _ = images.shape
     mm.load_model_gpu(model)
     device, dtype = mm.get_torch_device(), model.model.get_dtype()
@@ -156,7 +192,9 @@ def segment_frames(model, images, bboxes, pose_metas, refine=True, temporal=True
             box_inputs = torch.tensor([[[bbox[0] * sx, bbox[1] * sy], [bbox[2] * sx, bbox[3] * sy]]],
                                       device=device, dtype=dtype)
         kps = pose_metas[i]["keypoints_body"]
-        points = [(kps[k][0] * SAM3_SIZE, kps[k][1] * SAM3_SIZE) for k in PROMPT_KEYPOINTS if kps[k][2] > MIN_KEYPOINT_CONF]
+        points = [(kps[k][0], kps[k][1]) for k in PROMPT_KEYPOINTS if kps[k][2] > MIN_KEYPOINT_CONF]
+        points += torso_points(kps, MIN_KEYPOINT_CONF)
+        points = [(x * SAM3_SIZE, y * SAM3_SIZE) for x, y in points]
         if points:
             point_inputs = {"point_coords": torch.tensor([points], device=device, dtype=dtype),
                             "point_labels": torch.ones(1, len(points), dtype=torch.int32, device=device)}
@@ -172,7 +210,7 @@ def segment_frames(model, images, bboxes, pose_metas, refine=True, temporal=True
         with torch.inference_mode():
             logits = decode(sam3, frame, point_inputs, box_inputs, refine, mask_prior=prior)
             mask = F.interpolate(logits.float(), size=(H, W), mode="bilinear", align_corners=False)[0, 0]
-        masks[i] = torch.from_numpy(drop_islands((mask > 0).cpu().numpy().astype(np.uint8))).float()
+        masks[i] = torch.from_numpy(drop_islands(fill_holes((mask > 0).cpu().numpy().astype(np.uint8)))).float()
         prior, prior_box = (logits, bbox) if temporal and detected else (None, None)
         pbar.update(1)
     return masks
