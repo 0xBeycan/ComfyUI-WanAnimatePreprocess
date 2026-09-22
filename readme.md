@@ -42,6 +42,27 @@ There is no text prompt and no tracker: frames are independent, so nothing drift
 ghosts over long clips, and each mask is as good as that frame's detection. Islands far
 smaller than the main region are dropped. With `none` the mask output is empty.
 
+### Preprocess guard (beta)
+
+`WanAnimate V1 Preprocess Guard (beta)` sits between the preprocess node and the
+sampler: it takes `pose_data` and `mask`, passes both through, and stops the workflow
+with a report when the pose or the mask looks wrong, because sampling on a bad mask or
+pose is wasted. Every check is normalised by the detected person's size and crosses the
+mask with the independently produced pose:
+
+- pose guard: no detection, low keypoint confidence, torso jumping in one frame while
+  the box stays, the detector switching to another subject (`subject_switch`); more than
+  one confident person is a warning
+- mask guard: mask far too small for the box, mask leaking outside the box, a second
+  region at least 5% of the main one (a ghost or a second person; smaller specks are
+  warnings), confident keypoints outside the mask (a missed hand, foot or limb, named
+  in the report), the mask changing between frames while the person does not
+
+`report` is the text that also goes to the console, `metrics` is JSON with every
+measurement per frame and `timeline` plots them. Switch both guards off to calibrate the
+thresholds on clips you know: nothing stops then and the report, metrics and timeline
+are still produced.
+
 ### Other model sizes
 
 Any fp32 or fp16 ONNX export of these two model families loads:

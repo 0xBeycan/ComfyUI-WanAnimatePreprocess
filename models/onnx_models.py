@@ -219,6 +219,11 @@ class Yolo(OnnxModel):
                             person['bbox'] = results[i, :5]
                             person['track_id'] = int(person_count - 1)
                             person_results.append(person)
+            # people the detector is at least fairly sure of; the 0.05 threshold above also
+            # counts shadows and reflections
+            strong = int(sum(1 for bbox in results if bbox[-2] >= 0.3))
+            for person in person_results:
+                person['person_count'] = strong
             return person_results
         else:
             return None

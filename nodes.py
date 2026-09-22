@@ -72,6 +72,7 @@ from .utils import get_face_bboxes, padding_resize, resize_by_area, resize_to_bo
 from .models.sam3 import load_sam3, sam3_choices, segment_frames
 from .pose_utils.human_visualization import AAPoseMeta, draw_aapose_by_meta_new
 from .retarget_pose import get_retarget_pose
+from .guard import run_guard
 
 class OnnxDetectionModelLoader:
     @classmethod
@@ -163,11 +164,14 @@ class WanAnimateV1Preprocess:
         comfy_pbar = ProgressBar(B*2)
         progress = 0
         bboxes = []
+        person_counts = []
         for img in tqdm(images_np, total=len(images_np), desc="Detecting bboxes"):
-            bboxes.append(detector(
+            detection = detector(
                 cv2.resize(img, (640, 640)).transpose(2, 0, 1)[None],
                 shape
-                )[0][0]["bbox"])
+                )[0][0]
+            bboxes.append(detection["bbox"])
+            person_counts.append(detection.get("person_count", 0))
             progress += 1
             if progress % 10 == 0:
                 comfy_pbar.update_absolute(progress)
@@ -263,6 +267,13 @@ class WanAnimateV1Preprocess:
             "pose_metas": retarget_pose_metas,
             "refer_pose_meta": refer_pose_meta if retarget_image is not None else None,
             "pose_metas_original": pose_metas,
+            # per-frame detector result for the guard node: the chosen person box, its score
+            # (-1 when nothing was detected and the whole frame was used) and how many
+            # people the detector saw
+            "detections": [
+                {"bbox": [float(v) for v in bbox[:4]], "score": float(bbox[4]), "persons": int(count)}
+                for bbox, count in zip(bboxes, person_counts)
+            ],
         }
 
         if sam3_model != "none":
@@ -271,6 +282,44 @@ class WanAnimateV1Preprocess:
             mask = torch.zeros(B, H, W)
 
         return (pose_data, face_images_tensor, json.dumps(points_dict_list), [bbox_ints], face_bboxes, mask)
+
+class WanAnimateV1PreprocessGuard:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "pose_data": ("POSEDATA",),
+                "mask": ("MASK",),
+                "pose_guard": ("BOOLEAN", {"default": True, "tooltip": "Stop the workflow when a pose check fails (no detection, low confidence, torso jump, subject switch)"}),
+                "mask_guard": ("BOOLEAN", {"default": True, "tooltip": "Stop the workflow when a mask check fails (empty, leaking, fragmented, keypoints outside, unstable)"}),
+                "min_keypoint_conf": ("FLOAT", {"default": 0.3, "min": 0.0, "max": 1.0, "step": 0.05, "tooltip": "Keypoints below this confidence are left out of the checks"}),
+                "min_pose_conf": ("FLOAT", {"default": 0.35, "min": 0.0, "max": 1.0, "step": 0.05, "tooltip": "pose_low_confidence: mean body keypoint confidence below this"}),
+                "max_torso_jump": ("FLOAT", {"default": 0.25, "min": 0.0, "max": 2.0, "step": 0.05, "tooltip": "pose_jump: torso keypoints moving more than this fraction of the box diagonal in one frame while the box stays"}),
+                "min_mask_to_box": ("FLOAT", {"default": 0.15, "min": 0.0, "max": 1.0, "step": 0.05, "tooltip": "mask_empty: mask area below this fraction of the box area"}),
+                "max_mask_outside_box": ("FLOAT", {"default": 0.10, "min": 0.0, "max": 1.0, "step": 0.05, "tooltip": "mask_leak: more than this fraction of the mask outside the box grown by 10%"}),
+                "min_keypoint_recall": ("FLOAT", {"default": 0.9, "min": 0.0, "max": 1.0, "step": 0.05, "tooltip": "mask_missing_keypoints: fewer than this fraction of the confident keypoints inside the mask"}),
+                "min_mask_iou": ("FLOAT", {"default": 0.6, "min": 0.0, "max": 1.0, "step": 0.05, "tooltip": "mask_unstable: mask IoU with the previous frame below this while the box IoU is above 0.7"}),
+            },
+        }
+
+    RETURN_TYPES = ("POSEDATA", "MASK", "STRING", "STRING", "IMAGE")
+    RETURN_NAMES = ("pose_data", "mask", "report", "metrics", "timeline")
+    FUNCTION = "check"
+    CATEGORY = "WanAnimatePreprocess"
+    DESCRIPTION = "Beta. Checks the pose and the mask of WanAnimate V1 Preprocess frame by frame (missing detections, pose glitches, empty / leaking / fragmented masks, keypoints outside the mask, unstable masks). Wire it between the preprocess and the sampler: a failed check of an enabled guard stops the workflow with the report; 'metrics' has every measurement per frame and 'timeline' plots them."
+
+    def check(self, pose_data, mask, pose_guard, mask_guard, min_keypoint_conf, min_pose_conf, max_torso_jump,
+              min_mask_to_box, max_mask_outside_box, min_keypoint_recall, min_mask_iou):
+        thresholds = {
+            "min_keypoint_conf": min_keypoint_conf, "min_pose_conf": min_pose_conf, "max_torso_jump": max_torso_jump,
+            "min_mask_to_box": min_mask_to_box, "max_mask_outside_box": max_mask_outside_box,
+            "min_keypoint_recall": min_keypoint_recall, "min_mask_iou": min_mask_iou,
+        }
+        report, passed, metrics, timeline = run_guard(mask, pose_data, thresholds, pose_guard, mask_guard)
+        logging.info("[WanAnimatePreprocess] " + report.replace("\n", "\n    "))
+        if not passed:
+            raise RuntimeError(report)
+        return (pose_data, mask, report, metrics, timeline)
 
 class DrawViTPose:
     @classmethod
@@ -529,6 +578,7 @@ NODE_CLASS_MAPPINGS = {
     "OnnxDetectionModelLoader": OnnxDetectionModelLoader,
     "WanAnimateV1Preprocess": WanAnimateV1Preprocess,
     "PoseAndFaceDetection": WanAnimateV1Preprocess,  # former name, keeps saved workflows loading
+    "WanAnimateV1PreprocessGuard": WanAnimateV1PreprocessGuard,
     "DrawViTPose": DrawViTPose,
     "PoseRetargetPromptHelper": PoseRetargetPromptHelper,
     "PoseDetectionOneToAllAnimation": PoseDetectionOneToAllAnimation,
@@ -537,6 +587,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "OnnxDetectionModelLoader": "ONNX Detection Model Loader",
     "WanAnimateV1Preprocess": "WanAnimate V1 Preprocess",
     "PoseAndFaceDetection": "WanAnimate V1 Preprocess",
+    "WanAnimateV1PreprocessGuard": "WanAnimate V1 Preprocess Guard (beta)",
     "DrawViTPose": "Draw ViT Pose",
     "PoseRetargetPromptHelper": "Pose Retarget Prompt Helper",
     "PoseDetectionOneToAllAnimation": "Pose Detection OneToAll Animation",
