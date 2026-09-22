@@ -5,10 +5,11 @@
 Runs the model through this repo's loader (native ViTPose module or the generic graph
 executor) and through onnxruntime, prints the max abs difference per output and the time
 per run. With --image, a YOLO model (640x640 input) gets the image scaled to 640x640 in
-[0, 1] and the confident detections of both runs are printed; a ViTPose model (256x192
-input) gets a centre crop with ImageNet normalisation and the heatmap argmax agreement
-is printed. Without --image the input is random noise, which is fine for ViTPose but
-makes YOLO's TopK pick different low-score rows, so only the tensor diffs mean anything.
+[0, 1] and the confident detections of both runs are printed; a pose model gets a centre
+crop at the model's own input size with ImageNet normalisation and the argmax agreement of
+the heatmaps (ViTPose) or of the two SimCC axes (RTMW) is printed. Without --image the
+input is random noise, which is fine for a pose model but makes YOLO's TopK pick different
+low-score rows, so only the tensor diffs mean anything.
 
 onnxruntime is not a dependency of the node; install it (onnxruntime or onnxruntime-gpu)
 to run this.
@@ -118,6 +119,9 @@ def main():
         if r.ndim == 4 and r.shape[1] > 1 and args.image:
             same = (r[0].reshape(r.shape[1], -1).argmax(1) == o[0].reshape(o.shape[1], -1).argmax(1)).sum()
             print(f"  heatmap argmax agreement: {same} / {r.shape[1]}")
+        if r.ndim == 3 and r.shape[-1] > 6 and args.image:
+            same = (r[0].argmax(1) == o[0].argmax(1)).sum()
+            print(f"  simcc argmax agreement: {same} / {r.shape[1]}")
 
 
 if __name__ == "__main__":

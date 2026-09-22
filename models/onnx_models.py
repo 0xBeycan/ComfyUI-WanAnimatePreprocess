@@ -6,7 +6,7 @@ import torch
 from comfy import model_management as mm
 from comfy.model_patcher import ModelPatcher
 
-from ..pose_utils.pose2d_utils import box_convert_simple, keypoints_from_heatmaps
+from ..pose_utils.pose2d_utils import box_convert_simple, keypoints_from_heatmaps, transform_preds
 from .onnx_graph import GraphModule, OnnxGraph
 from .vitpose import build_vitpose
 
@@ -20,13 +20,18 @@ def load_models(*models):
 class OnnxModel:
     """An ONNX model run with torch and managed by ComfyUI like any other model."""
 
+    # tensors the graph returns: one heatmap / detection tensor, two for a SimCC pose head
+    outputs = 1
+
     def __init__(self, checkpoint):
         graph = OnnxGraph(checkpoint)
-        if len(graph.inputs) != 1 or len(graph.outputs) != 1:
+        if len(graph.inputs) != 1 or len(graph.outputs) != self.outputs:
             raise ValueError(f"{checkpoint} has {len(graph.inputs)} inputs and {len(graph.outputs)} outputs; "
-                             "the detection models take one image and return one tensor")
+                             f"{type(self).__name__} takes one image and returns {self.outputs}")
         native = build_vitpose(graph)
         self.net = (native or GraphModule(graph)).eval()
+        # [N, C, H, W] as the graph declares it; the batch dimension is usually a name
+        self.input_shape = graph.input_shapes[graph.inputs[0]]
         # the graph executor runs the model's own Cast nodes, so it takes the declared input
         # type; the native ViTPose module skips them and takes its weights' type
         self.input_dtype = graph.input_dtypes[graph.inputs[0]] if native is None else next(self.net.parameters()).dtype
@@ -41,6 +46,8 @@ class OnnxModel:
         x = torch.from_numpy(np.ascontiguousarray(x)).to(self.patcher.load_device, self.input_dtype)
         with torch.inference_mode():
             out = self.net(x)
+        if isinstance(out, tuple):
+            return tuple(o.float().cpu().numpy() for o in out)
         return out.float().cpu().numpy()
 
 
@@ -272,3 +279,43 @@ class ViTPose(OnnxModel):
                                             unbiased=True,
                                             use_udp=False)
         return np.concatenate([points, prob], axis=2)
+
+
+# RTMW's head is SimCC, not a heatmap: it classifies each keypoint's column and its row
+# separately over the model input's pixels sampled SIMCC_SPLIT_RATIO times each, so the
+# graph returns simcc_x [N, 133, 288 * 2] and simcc_y [N, 133, 384 * 2].
+SIMCC_SPLIT_RATIO = 2.0
+# What mmpose calls the SimCC score is min(max simcc_x, max simcc_y), and those are logits,
+# not probabilities: measured over 25 frames of a dancer they run 1.8 to 8.0, so the raw
+# number means nothing to the 0.3 / 0.5 thresholds the guard, the mask seeding and the
+# drawing all apply to ViTPose's heatmap maxima. The rule for the divisor: a body keypoint
+# the model has clearly found should read what the same keypoint reads on ViTPose. Those
+# medians are 5.62 raw and 0.929, so the divisor is 6. It leaves the median body keypoint at
+# 0.94, 99.8% of the body and 100% of the face above the 0.5 the drawing uses, and every
+# body keypoint of a person who is in the crop above the guard's 0.3.
+#
+# What it cannot fix: SimCC is less decisive than a heatmap about a keypoint that is not
+# there, because it still has to pick some column and some row inside the crop. On keypoints
+# the crop cuts off, a third stay above 0.3 where only a sixth of ViTPose's do, so the guard
+# sees a few more confident keypoints than it used to on frames that cut the person.
+SIMCC_CONF_SCALE = 6.0
+
+
+class RTMW(OnnxModel):
+    """RTMW wholebody: the same 133 COCO-WholeBody keypoints as ViTPose, from a SimCC head,
+    decoded the way mmpose's get_simcc_maximum / SimCCLabel.decode do."""
+
+    outputs = 2
+
+    def forward(self, img, center, scale, **kwargs):
+        simcc_x, simcc_y = self.run(img)
+        points = np.stack([simcc_x.argmax(axis=2), simcc_y.argmax(axis=2)], axis=-1)
+        points = points.astype(np.float32) / SIMCC_SPLIT_RATIO
+        vals = np.minimum(simcc_x.max(axis=2), simcc_y.max(axis=2))
+        # the points are in the crop `crop` cut, so they go back to the frame through the
+        # same transform the heatmap decode uses, over the input grid instead of a heatmap
+        width, height = self.input_shape[3], self.input_shape[2]
+        for i in range(len(points)):
+            points[i] = transform_preds(points[i], center[i], scale[i] * 200, [width, height])
+        prob = np.clip(vals / SIMCC_CONF_SCALE, 0.0, 1.0)
+        return np.concatenate([points, prob[..., None]], axis=2)

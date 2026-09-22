@@ -430,6 +430,8 @@ class GraphModule(nn.Module):
         else:
             lo = None if lo is None else self._value(node, 1, lo)
             hi = None if hi is None else self._value(node, 2, hi)
+        # both bounds are scalars, which an export may still write as one-element tensors
+        lo, hi = (v[0] if isinstance(v, list) else v for v in (lo, hi))
         return torch.clamp(x, lo, hi)
 
     def op_Identity(self, node, x):
@@ -526,6 +528,14 @@ class GraphModule(nn.Module):
     def op_Flatten(self, node, x):
         axis = node.attrs.get("axis", 1)
         return x.reshape(1, -1) if axis == 0 else x.reshape(math.prod(x.shape[:axis]), -1)
+
+    def op_DepthToSpace(self, node, x):
+        b = node.attrs["blocksize"]
+        N, C, H, W = x.shape
+        if node.attrs.get("mode", "DCR") == "CRD":
+            # channels of one output pixel lie together, which is what pixel_shuffle does
+            return F.pixel_shuffle(x, b)
+        return x.reshape(N, b, b, C // (b * b), H, W).permute(0, 3, 4, 1, 5, 2).reshape(N, C // (b * b), H * b, W * b)
 
     def op_Squeeze(self, node, x, axes=None):
         axes = self._axes(node, 1, axes)

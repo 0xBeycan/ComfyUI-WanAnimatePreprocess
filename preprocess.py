@@ -1,5 +1,5 @@
 """The Wan Animate preprocess, frame by frame: person box (YOLO), body / hand / face
-keypoints (ViTPose), face crops, the person mask (SAM3) and the drawn pose images."""
+keypoints (RTMW), face crops, the person mask (SAM3) and the drawn pose images."""
 import cv2
 import numpy as np
 import torch
@@ -13,9 +13,17 @@ from .pose_utils.human_visualization import draw_aapose_by_meta_new
 from .pose_utils.pose2d_utils import AAPoseMeta, bbox_from_detector, crop, load_pose_metas_from_kp2ds_seq
 from .utils import get_face_bboxes
 
+# Verified in the pipeline.json OpenMMLab ships beside this exact ONNX, and in the mmpose
+# config behind it: RTMW normalises with mean=[123.675, 116.28, 103.53],
+# std=[58.395, 57.12, 57.375] and to_rgb, over a crop taken with padding 1.25. On the 0..1
+# RGB frames ComfyUI hands us that is exactly the ImageNet numbers below, and exactly the
+# POSE_CROP_RESCALE below, so neither had to change from what ViTPose wanted.
 IMG_NORM_MEAN = np.array([0.485, 0.456, 0.406])
 IMG_NORM_STD = np.array([0.229, 0.224, 0.225])
-POSE_INPUT_RESOLUTION = (256, 192)
+# (height, width) of the pose model's input. RTMW wants 384x288, which is the same 4:3 the
+# 256x192 ViTPose crop had, so `bbox_from_detector` cuts the very same region out of the
+# frame and only the resolution it is sampled at changes.
+POSE_INPUT_RESOLUTION = (384, 288)
 POSE_CROP_RESCALE = 1.25
 FACE_CROP_SCALE = 1.3
 FACE_SIZE = 512
