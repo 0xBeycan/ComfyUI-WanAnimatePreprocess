@@ -50,12 +50,15 @@ MIN_KEYPOINT_CONF = 0.3
 # hundred frames), so it is re-anchored well before that; the memory is what keeps the
 # mask through frames the pose model loses to motion blur.
 RESEED_INTERVAL = 24
-# Re-seeding only helps from a frame the pose model is sure about: the first attempt
-# re-seeded on schedule and landed on a motion-blurred frame, which replaced a good
-# propagated mask with a bad prompt. A frame is an anchor when the detector found the
-# person and this many keypoints are confident, this confident on average.
+# Re-seeding only helps from a frame the pose model is sure about: re-seeding on schedule
+# landed on a motion-blurred frame, which replaced a good propagated mask with a bad
+# prompt. A frame is an anchor when the detector found the person, enough keypoints are
+# confident, they are confident on average, and the pose is no less complete than the one
+# the current segment was seeded from - the blurred frames lose the knees while the head
+# and the torso stay confident, so the count is what tells them apart.
 MIN_ANCHOR_KEYPOINTS = 8
 MIN_ANCHOR_CONF = 0.5
+MIN_ANCHOR_COMPLETENESS = 0.9
 # Propagating for longer than this without an anchor is not worth the drift risk: re-seed
 # from whatever the frame offers.
 MAX_PROPAGATE = 3 * RESEED_INTERVAL
@@ -221,13 +224,20 @@ def keypoint_recall(mask, kps, W, H):
     return sum(1 for x, y in confident if mask[y, x]) / len(confident)
 
 
-def is_anchor(frame_index, bboxes, pose_metas):
-    """Whether this frame's detection and pose are good enough to re-seed the tracker from."""
+def confident_count(pose_meta):
+    return sum(1 for _, _, c in pose_meta["keypoints_body"] if c > MIN_KEYPOINT_CONF)
+
+
+def is_anchor(frame_index, bboxes, pose_metas, reference_count=0):
+    """Whether this frame's detection and pose are good enough to re-seed the tracker from.
+    `reference_count` is how many keypoints the running segment was seeded with: a frame
+    that sees fewer of them is a worse view of the person, not a better anchor."""
     bbox = bboxes[frame_index]
     if bbox is None or bbox[-1] <= 0:
         return False
     conf = [c for _, _, c in pose_metas[frame_index]["keypoints_body"] if c > MIN_KEYPOINT_CONF]
-    return len(conf) >= MIN_ANCHOR_KEYPOINTS and sum(conf) / len(conf) >= MIN_ANCHOR_CONF
+    return (len(conf) >= max(MIN_ANCHOR_KEYPOINTS, MIN_ANCHOR_COMPLETENESS * reference_count)
+            and sum(conf) / len(conf) >= MIN_ANCHOR_CONF)
 
 
 def clean(mask):
@@ -269,7 +279,7 @@ def segment_frames(model, images, bboxes, pose_metas, refine=True, temporal=True
             seed = (F.interpolate(logits.float(), size=(H, W), mode="bilinear", align_corners=False)[0, 0] > 0).cpu().numpy()
         masks[i] = torch.from_numpy(clean(seed)).float()
         seeds += 1
-        seed_frame = i
+        seed_frame, seed_count = i, confident_count(pose_metas[i])
         pbar.update(1)
         i += 1
         if not temporal or i >= N:
@@ -290,7 +300,7 @@ def segment_frames(model, images, bboxes, pose_metas, refine=True, temporal=True
                 masks[k] = torch.from_numpy(clean(mask)).float()
                 pbar.update(1)
                 i = k + 1
-                if i - seed_frame >= RESEED_INTERVAL and (is_anchor(i, bboxes, pose_metas) if i < N else True):
+                if i - seed_frame >= RESEED_INTERVAL and (is_anchor(i, bboxes, pose_metas, seed_count) if i < N else True):
                     stop = True
                     break
                 if i - seed_frame >= MAX_PROPAGATE:
