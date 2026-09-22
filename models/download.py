@@ -1,17 +1,18 @@
 """Model download used by the loader and the SAM3 segmentation on first use."""
-import logging
 import os
 import urllib.request
 
 from comfy.utils import ProgressBar
 from tqdm import tqdm
 
+from .. import log
+
 
 def download(url, path):
     """Stream `url` to `path` through a .part file, so an interrupted download never leaves
     a truncated model behind."""
     name = os.path.basename(path)
-    logging.info(f"[WanAnimatePreprocess] downloading {name} from {url}")
+    log.info(f"downloading {name} from {url}")
     part = path + ".part"
     try:
         request = urllib.request.Request(url, headers={"User-Agent": "ComfyUI-WanAnimatePreprocess"})

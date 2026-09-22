@@ -20,6 +20,7 @@ import folder_paths
 from comfy import model_management as mm
 from comfy.utils import ProgressBar, common_upscale
 
+from .. import log
 from .download import download
 
 DEFAULT_SAM3 = "sam3.1_multiplex_fp16.safetensors"
@@ -67,7 +68,8 @@ def load_sam3(name):
     if path is None:
         raise FileNotFoundError(f"SAM3 checkpoint {name} is not in models/checkpoints")
     _loaded["name"], _loaded["model"] = None, None
-    model = comfy.sd.load_checkpoint_guess_config(path, output_vae=False, output_clip=False)[0]
+    with log.step(f"loading {name}"):
+        model = comfy.sd.load_checkpoint_guess_config(path, output_vae=False, output_clip=False)[0]
     _loaded["name"], _loaded["model"] = name, model
     return model
 

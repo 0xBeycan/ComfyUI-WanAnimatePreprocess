@@ -196,47 +196,70 @@ def write_report(rows, flags, enabled):
     return "\n".join(lines), not failed
 
 
-def timeline_image(rows, flags):
-    """Metrics over frames with the flagged frames marked, as an IMAGE tensor."""
-    import matplotlib
-    import matplotlib.pyplot as plt
+PANEL_W, PANEL_H, MARGIN_L, MARGIN_R, MARGIN_T, GAP = 1200, 190, 210, 20, 34, 34
+COLORS = {"blue": (31, 119, 180), "orange": (255, 127, 14), "green": (44, 160, 44), "red": (214, 39, 40), "grey": (150, 150, 150)}
 
-    plt.switch_backend("Agg")
+
+def _polyline(img, values, x0, y0, w, h, color):
+    pts = [(int(x0 + i / max(len(values) - 1, 1) * w), int(y0 + h - min(max(v, 0.0), 1.0) * h))
+           for i, v in enumerate(values) if v is not None]
+    for a, b in zip(pts, pts[1:]):
+        cv2.line(img, a, b, color, 1, cv2.LINE_AA)
+
+
+def _panel(img, y0, title, series):
+    """One panel: a 0..1 axis with gridlines and the named series drawn over it."""
+    x0, w, h = MARGIN_L, PANEL_W - MARGIN_L - MARGIN_R, PANEL_H - GAP
+    cv2.rectangle(img, (x0, y0), (x0 + w, y0 + h), COLORS["grey"], 1)
+    for frac in (0.0, 0.25, 0.5, 0.75, 1.0):
+        y = int(y0 + h - frac * h)
+        if 0 < frac < 1:
+            cv2.line(img, (x0, y), (x0 + w, y), (225, 225, 225), 1)
+        cv2.putText(img, f"{frac:.2f}", (x0 - 38, y + 4), cv2.FONT_HERSHEY_SIMPLEX, 0.35, COLORS["grey"], 1, cv2.LINE_AA)
+    # title and legend on the line above the panel
+    cv2.putText(img, title, (x0, y0 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (40, 40, 40), 1, cv2.LINE_AA)
+    legend_x = x0 + 90
+    for name, values, color in series:
+        _polyline(img, values, x0, y0, w, h, color)
+        cv2.line(img, (legend_x, y0 - 14), (legend_x + 18, y0 - 14), color, 2)
+        cv2.putText(img, name, (legend_x + 24, y0 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (40, 40, 40), 1, cv2.LINE_AA)
+        legend_x += 8 * len(name) + 56
+
+
+def timeline_image(rows, flags):
+    """Metrics over frames with the flagged frames marked, as an IMAGE tensor (no plotting
+    library needed, drawn with OpenCV)."""
     n = len(rows)
-    x = np.arange(n)
-    fig, axes = plt.subplots(4, 1, figsize=(12, 9), sharex=True, dpi=100)
-    ax = axes[0]
-    ax.plot(x, [m["mask_to_box"] for m in rows], label="mask / box area")
-    ax.plot(x, [m["mask_outside_box"] for m in rows], label="mask outside box")
-    ax.set_ylim(0, max(1.0, max(m["mask_to_box"] for m in rows) * 1.05))
-    ax.legend(loc="upper right", fontsize=8)
-    ax = axes[1]
-    ax.plot(x, [m["keypoint_recall"] for m in rows], label="keypoints inside mask")
-    ax.plot(x, [m["pose_conf"] for m in rows], label="mean keypoint confidence")
-    ax.set_ylim(0, 1.05)
-    ax.legend(loc="lower right", fontsize=8)
-    ax = axes[2]
-    ax.plot(x, [m["mask_iou_prev"] if m["mask_iou_prev"] is not None else np.nan for m in rows], label="mask IoU vs previous")
-    ax.plot(x, [m["box_iou_prev"] if m["box_iou_prev"] is not None else np.nan for m in rows], label="box IoU vs previous")
-    ax.plot(x, [m["torso_jump"] for m in rows], label="torso jump / box diagonal")
-    ax.set_ylim(0, 1.05)
-    ax.legend(loc="lower right", fontsize=8)
-    ax = axes[3]
     names = list(flags) or ["(no flags)"]
+    flag_h = 24 * len(names) + 40
+    height = MARGIN_T + 3 * PANEL_H + flag_h + 30
+    img = np.full((height, PANEL_W, 3), 255, np.uint8)
+    y = MARGIN_T
+    _panel(img, y, "mask", [("mask / box area", [m["mask_to_box"] for m in rows], COLORS["blue"]),
+                            ("mask outside box", [m["mask_outside_box"] for m in rows], COLORS["orange"])])
+    y += PANEL_H
+    _panel(img, y, "pose", [("keypoints inside mask", [m["keypoint_recall"] for m in rows], COLORS["blue"]),
+                            ("mean keypoint confidence", [m["pose_conf"] for m in rows], COLORS["orange"])])
+    y += PANEL_H
+    _panel(img, y, "motion", [("mask IoU vs previous", [m["mask_iou_prev"] for m in rows], COLORS["blue"]),
+                              ("box IoU vs previous", [m["box_iou_prev"] for m in rows], COLORS["orange"]),
+                              ("torso jump / box diagonal", [m["torso_jump"] for m in rows], COLORS["green"])])
+    y += PANEL_H
+    x0, w = MARGIN_L, PANEL_W - MARGIN_L - MARGIN_R
+    cv2.putText(img, "flags", (x0, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (40, 40, 40), 1, cv2.LINE_AA)
+    cv2.rectangle(img, (x0, y), (x0 + w, y + flag_h - 30), COLORS["grey"], 1)
     for row, name in enumerate(names):
-        frames = flags.get(name, [])
-        ax.scatter(frames, [row] * len(frames), s=12, marker="s", color="tab:orange" if name in WARNINGS else "tab:red")
-    ax.set_yticks(range(len(names)))
-    ax.set_yticklabels(names, fontsize=8)
-    ax.set_ylim(-0.5, len(names) - 0.5)
-    ax.set_xlabel("frame")
-    for a in axes:
-        a.grid(alpha=0.3)
-    fig.tight_layout()
-    fig.canvas.draw()
-    rgb = np.asarray(fig.canvas.buffer_rgba())[..., :3].copy()
-    plt.close(fig)
-    return torch.from_numpy(rgb).float().unsqueeze(0) / 255.0
+        cy = y + 16 + 24 * row
+        cv2.putText(img, name, (12, cy + 4), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (40, 40, 40), 1, cv2.LINE_AA)
+        color = COLORS["orange"] if name in WARNINGS else COLORS["red"]
+        for f in flags.get(name, []):
+            cx = int(x0 + f / max(n - 1, 1) * w)
+            cv2.rectangle(img, (cx - 2, cy - 4), (cx + 2, cy + 4), color, -1)
+    for frac in (0.0, 0.25, 0.5, 0.75, 1.0):
+        cx = int(x0 + frac * w)
+        cv2.putText(img, str(int(frac * (n - 1))), (cx - 8, height - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.38, COLORS["grey"], 1, cv2.LINE_AA)
+    cv2.putText(img, "frame", (PANEL_W // 2 - 20, height - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (40, 40, 40), 1, cv2.LINE_AA)
+    return torch.from_numpy(img).float().unsqueeze(0) / 255.0
 
 
 def run_guard(mask, pose_data, thresholds, pose_guard, mask_guard):
