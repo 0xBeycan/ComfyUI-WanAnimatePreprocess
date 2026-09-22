@@ -16,8 +16,8 @@ Per frame, from `pose_data` (keypoints, detections) and the mask:
   multi_person        the detector saw more than one person at 30% or more (warning only)
   mask_empty          no mask at all, or (on a frame with a reliable box) mask area below
                       `min_mask_to_box` of the box area
-  mask_leak           more than `max_mask_outside_box` of the mask lies outside this and the
-                      previous frame's box, grown by 10% (background or a neighbour pulled
+  mask_leak           more than `max_mask_outside_box` of the mask lies outside the boxes of
+                      the frames around it, grown by 10% (background or a neighbour pulled
                       in); only checked on a frame whose box the detector and the pose model
                       agree on
   mask_fragmented     a second region at least 5% of the largest one (a ghost, a second
@@ -54,6 +54,10 @@ BOX_MARGIN = 0.10
 # person, which read as a leak; such frames are reported as pose_low_confidence instead.
 RELIABLE_KEYPOINTS = 8
 RELIABLE_CONF = 0.5
+# The mask is compared with the boxes of this many frames either side, grown by BOX_MARGIN:
+# the person cannot leave that envelope in a few frames, while a mask that jumps to the
+# background or to somebody else still falls outside it.
+BOX_WINDOW = 4
 SPECK_FRACTION = 0.01     # detached pieces above this fraction of the main region are reported
 FRAGMENT_FRACTION = 0.05  # and above this one they count as a second object
 
@@ -88,9 +92,33 @@ def _ranges(frames):
     return ", ".join(out)
 
 
+def box_envelopes(detections, N, W, H):
+    """Per frame, the union of the detector boxes within BOX_WINDOW frames either side,
+    grown by BOX_MARGIN and clipped to the frame."""
+    grown = []
+    for det in detections:
+        x1, y1, x2, y2 = det["bbox"]
+        if det["score"] <= 0:
+            grown.append(None)
+            continue
+        bw, bh = max(x2 - x1, 1.0), max(y2 - y1, 1.0)
+        grown.append((max(0.0, x1 - BOX_MARGIN * bw), max(0.0, y1 - BOX_MARGIN * bh),
+                      min(float(W), x2 + BOX_MARGIN * bw), min(float(H), y2 + BOX_MARGIN * bh)))
+    out = []
+    for i in range(N):
+        near = [b for b in grown[max(0, i - BOX_WINDOW):i + BOX_WINDOW + 1] if b is not None]
+        if not near:
+            out.append((0.0, 0.0, float(W), float(H)))
+        else:
+            out.append((min(b[0] for b in near), min(b[1] for b in near),
+                        max(b[2] for b in near), max(b[3] for b in near)))
+    return out
+
+
 def frame_metrics(masks, pose_metas, detections, min_keypoint_conf):
     """One dict of raw measurements per frame; thresholds are applied afterwards."""
     N, H, W = masks.shape
+    envelopes = box_envelopes(detections, N, W, H)
     rows = []
     prev = None
     for i in range(N):
@@ -111,16 +139,7 @@ def frame_metrics(masks, pose_metas, detections, min_keypoint_conf):
         m["box_reliable"] = bool(m["detected"] and confident.sum() >= RELIABLE_KEYPOINTS
                                  and (kps[confident, 2].mean() if confident.any() else 0) >= RELIABLE_CONF)
 
-        # mask outside the grown box, or outside the previous frame's grown box: on a blurred
-        # frame the box shrinks around the blur while the person is still where it was, and
-        # comparing against this frame's box alone reads the correct mask as a leak
-        gx1, gy1 = max(0.0, x1 - BOX_MARGIN * bw), max(0.0, y1 - BOX_MARGIN * bh)
-        gx2, gy2 = min(float(W), x2 + BOX_MARGIN * bw), min(float(H), y2 + BOX_MARGIN * bh)
-        if prev is not None and prev["detected"] and m["detected"]:
-            px1, py1, px2, py2 = prev["bbox"]
-            pbw, pbh = max(px2 - px1, 1.0), max(py2 - py1, 1.0)
-            gx1, gy1 = min(gx1, max(0.0, px1 - BOX_MARGIN * pbw)), min(gy1, max(0.0, py1 - BOX_MARGIN * pbh))
-            gx2, gy2 = max(gx2, min(float(W), px2 + BOX_MARGIN * pbw)), max(gy2, min(float(H), py2 + BOX_MARGIN * pbh))
+        gx1, gy1, gx2, gy2 = envelopes[i]
         inside = int(mask[int(gy1):int(gy2), int(gx1):int(gx2)].sum())
         m["mask_outside_box"] = (area - inside) / area if area else 0.0
 
