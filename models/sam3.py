@@ -32,6 +32,11 @@ SAM3_SIZE = 1008
 # ankles in the body layout (see guard.BODY_NAMES).
 PROMPT_KEYPOINTS = (0, 1, 2, 5, 8, 11, 10, 13)
 MIN_KEYPOINT_CONF = 0.3
+# The previous frame's mask is given to the decoder as a prior alongside the box and the
+# points: on a close-up, where the person fills the frame and the boundary is ambiguous,
+# an independent decision per frame makes the mask flicker. The prior is dropped when the
+# detector box jumps (a cut, or another subject), so a wrong mask cannot carry on.
+MIN_PRIOR_BOX_IOU = 0.5
 # Islands smaller than this fraction of the largest region are decoder noise (specks in
 # shadows and edges), not the person; downstream block masks would blow them up.
 MIN_ISLAND_FRACTION = 0.01
@@ -84,13 +89,13 @@ def has_fast_path(sam3):
     return sam3._wanpre_fast_path
 
 
-def decode(sam3, frame, point_inputs, box_inputs, refine):
-    """Mask logits for one 1008x1008 frame from box / point prompts, with an optional
-    refinement pass that feeds the first mask back to the decoder. This is SAM3Model.
-    forward_segment with the image encoder run once: its features do not depend on the
-    prompt, so the second pass only runs the SAM heads instead of the whole network."""
+def decode(sam3, frame, point_inputs, box_inputs, refine, mask_prior=None):
+    """Mask logits for one 1008x1008 frame from box / point prompts and an optional mask
+    prior, with an optional refinement pass that feeds the first mask back to the decoder.
+    This is SAM3Model.forward_segment with the image encoder run once: its features do not
+    depend on the prompt, so the later passes only run the SAM heads."""
     if not has_fast_path(sam3):
-        logits = sam3.forward_segment(frame, point_inputs=point_inputs, box_inputs=box_inputs)
+        logits = sam3.forward_segment(frame, point_inputs=point_inputs, box_inputs=box_inputs, mask_inputs=mask_prior)
         return sam3.forward_segment(frame, mask_inputs=logits) if refine else logits
     bb = sam3.detector.backbone["vision_backbone"]
     if bb.multiplex:
@@ -110,8 +115,8 @@ def decode(sam3, frame, point_inputs, box_inputs, refine):
         backbone_feat = (flat + cast_to_input(no_mem, flat)).view(B, H, W, C).permute(0, 3, 1, 2)
     num_pts = 0 if point_inputs is None else point_inputs["point_labels"].size(1)
     _, logits, _, _ = tracker._forward_sam_heads(
-        backbone_features=backbone_feat, point_inputs=point_inputs, mask_inputs=None, box_inputs=box_inputs,
-        high_res_features=high_res, multimask_output=(0 < num_pts <= 1))
+        backbone_features=backbone_feat, point_inputs=point_inputs, mask_inputs=mask_prior, box_inputs=box_inputs,
+        high_res_features=high_res, multimask_output=(0 < num_pts <= 1 and mask_prior is None))
     if refine:
         _, logits, _, _ = tracker._forward_sam_heads(
             backbone_features=backbone_feat, point_inputs=None, mask_inputs=logits, box_inputs=None,
@@ -119,12 +124,22 @@ def decode(sam3, frame, point_inputs, box_inputs, refine):
     return logits
 
 
-def segment_frames(model, images, bboxes, pose_metas, refine=True):
+def box_iou(a, b):
+    x1, y1 = max(a[0], b[0]), max(a[1], b[1])
+    x2, y2 = min(a[2], b[2]), min(a[3], b[3])
+    inter = max(0.0, x2 - x1) * max(0.0, y2 - y1)
+    union = (a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - inter
+    return inter / union if union > 0 else 0.0
+
+
+def segment_frames(model, images, bboxes, pose_metas, refine=True, temporal=True):
     """[N, H, W] float masks of the detected person in `images` [N, H, W, 3].
 
-    `bboxes[i]` is frame i's detector box as (x1, y1, x2, y2, score) or None;
-    `pose_metas[i]["keypoints_body"]` its body keypoints, normalised to the frame, with
-    confidence. A frame with neither a box nor a confident keypoint gets an empty mask."""
+    `bboxes[i]` is frame i's detector box as (x1, y1, x2, y2, score); a score of -1 means
+    nothing was detected. `pose_metas[i]["keypoints_body"]` are its body keypoints,
+    normalised to the frame, with confidence. A frame with neither a box nor a confident
+    keypoint gets an empty mask. With `temporal`, the previous frame's mask is carried into
+    the decoder as a prior, which keeps an ambiguous boundary from flickering."""
     N, H, W, _ = images.shape
     mm.load_model_gpu(model)
     device, dtype = mm.get_torch_device(), model.model.get_dtype()
@@ -132,10 +147,12 @@ def segment_frames(model, images, bboxes, pose_metas, refine=True):
     sx, sy = SAM3_SIZE / W, SAM3_SIZE / H
     masks = torch.zeros(N, H, W)
     pbar = ProgressBar(N)
+    prior, prior_box = None, None
     for i in range(N):
         box_inputs = point_inputs = None
         bbox = bboxes[i]
-        if bbox is not None and bbox[-1] > 0:
+        detected = bbox is not None and bbox[-1] > 0
+        if detected:
             box_inputs = torch.tensor([[[bbox[0] * sx, bbox[1] * sy], [bbox[2] * sx, bbox[3] * sy]]],
                                       device=device, dtype=dtype)
         kps = pose_metas[i]["keypoints_body"]
@@ -144,13 +161,18 @@ def segment_frames(model, images, bboxes, pose_metas, refine=True):
             point_inputs = {"point_coords": torch.tensor([points], device=device, dtype=dtype),
                             "point_labels": torch.ones(1, len(points), dtype=torch.int32, device=device)}
         if box_inputs is None and point_inputs is None:
+            prior, prior_box = None, None
             pbar.update(1)
             continue
+        # the prior only carries over while the person stays where it was
+        if prior is not None and not (detected and prior_box is not None and box_iou(bbox, prior_box) >= MIN_PRIOR_BOX_IOU):
+            prior = None
         frame = common_upscale(images[i:i + 1, ..., :3].movedim(-1, 1), SAM3_SIZE, SAM3_SIZE, "bilinear", crop="disabled")
         frame = frame.to(device=device, dtype=dtype)
         with torch.inference_mode():
-            logits = decode(sam3, frame, point_inputs, box_inputs, refine)
+            logits = decode(sam3, frame, point_inputs, box_inputs, refine, mask_prior=prior)
             mask = F.interpolate(logits.float(), size=(H, W), mode="bilinear", align_corners=False)[0, 0]
         masks[i] = torch.from_numpy(drop_islands((mask > 0).cpu().numpy().astype(np.uint8))).float()
+        prior, prior_box = (logits, bbox) if temporal and detected else (None, None)
         pbar.update(1)
     return masks
