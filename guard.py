@@ -14,9 +14,11 @@ Per frame, from `pose_data` (keypoints, detections) and the mask:
   subject_switch      box IoU with the previous frame below 0.3 (the detector picked
                       someone / something else)
   multi_person        the detector saw more than one person at 30% or more (warning only)
-  mask_empty          mask area below `min_mask_to_box` of the box area
+  mask_empty          no mask at all, or (on a frame with a reliable box) mask area below
+                      `min_mask_to_box` of the box area
   mask_leak           more than `max_mask_outside_box` of the mask lies outside the box
-                      grown by 10% (background or a neighbour pulled in)
+                      grown by 10% (background or a neighbour pulled in); only checked on
+                      a frame whose box the detector and the pose model agree on
   mask_fragmented     a second region at least 5% of the largest one (a ghost, a second
                       person, a split body); smaller detached pieces such as a shadow
                       blob are reported as mask_specks (warning only)
@@ -45,6 +47,12 @@ WARNINGS = {"multi_person", "mask_specks"}
 POSE_CHECKS = ("no_detection", "pose_low_confidence", "pose_jump", "subject_switch", "multi_person")
 MASK_CHECKS = ("mask_empty", "mask_leak", "mask_fragmented", "mask_missing_keypoints", "mask_unstable", "mask_specks")
 BOX_MARGIN = 0.10
+# The box-based checks compare the mask with the detector's box, so they only mean anything
+# on a frame the detector and the pose model agree on. On a motion-blurred frame the box
+# shrinks around the blurred body while the mask (carried by the tracker) still covers the
+# person, which read as a leak; such frames are reported as pose_low_confidence instead.
+RELIABLE_KEYPOINTS = 8
+RELIABLE_CONF = 0.5
 SPECK_FRACTION = 0.01     # detached pieces above this fraction of the main region are reported
 FRAGMENT_FRACTION = 0.05  # and above this one they count as a second object
 
@@ -99,6 +107,8 @@ def frame_metrics(masks, pose_metas, detections, min_keypoint_conf):
         m = {"frame": i, "detected": det["score"] > 0, "persons": det["persons"],
              "pose_conf": float(kps[:, 2].mean()), "confident_keypoints": int(confident.sum()),
              "mask_area": area / (H * W), "mask_to_box": area / (bw * bh)}
+        m["box_reliable"] = bool(m["detected"] and confident.sum() >= RELIABLE_KEYPOINTS
+                                 and (kps[confident, 2].mean() if confident.any() else 0) >= RELIABLE_CONF)
 
         # mask outside the grown box
         gx1, gy1 = int(max(0, x1 - BOX_MARGIN * bw)), int(max(0, y1 - BOX_MARGIN * bh))
@@ -161,15 +171,18 @@ def apply_checks(rows, t):
             flag("subject_switch", i)
         if m["persons"] > 1:
             flag("multi_person", i)
-        if m["mask_to_box"] < t["min_mask_to_box"]:
+        if m["mask_area"] == 0:
             flag("mask_empty", i)
-        elif m["mask_outside_box"] > t["max_mask_outside_box"]:
-            flag("mask_leak", i)
+        elif m["box_reliable"]:
+            if m["mask_to_box"] < t["min_mask_to_box"]:
+                flag("mask_empty", i)
+            elif m["mask_outside_box"] > t["max_mask_outside_box"]:
+                flag("mask_leak", i)
         if any(f >= FRAGMENT_FRACTION for f in m["fragments"]):
             flag("mask_fragmented", i)
         elif m["fragments"]:
             flag("mask_specks", i)
-        if m["keypoint_recall"] < t["min_keypoint_recall"] and m["mask_to_box"] >= t["min_mask_to_box"]:
+        if m["keypoint_recall"] < t["min_keypoint_recall"] and m["mask_area"] > 0:
             flag("mask_missing_keypoints", i)
         if (m["mask_iou_prev"] is not None and m["box_iou_prev"] is not None
                 and m["box_iou_prev"] > 0.7 and m["mask_iou_prev"] < t["min_mask_iou"]):
