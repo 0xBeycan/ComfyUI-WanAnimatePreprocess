@@ -34,6 +34,7 @@ if _detection_exts and ".onnx" not in _detection_exts:
 from .models.onnx_models import ViTPose, Yolo
 from .pose_utils.pose2d_utils import load_pose_metas_from_kp2ds_seq, crop, bbox_from_detector
 from .utils import get_face_bboxes, padding_resize, resize_by_area, resize_to_bounds
+from .models.sam3 import load_sam3, sam3_choices, segment_frames
 from .pose_utils.human_visualization import AAPoseMeta, draw_aapose_by_meta_new
 from .retarget_pose import get_retarget_pose
 
@@ -69,7 +70,7 @@ class OnnxDetectionModelLoader:
 
         return (model, )
 
-class PoseAndFaceDetection:
+class WanAnimateV1Preprocess:
     @classmethod
     def INPUT_TYPES(s):
         return {
@@ -82,16 +83,17 @@ class PoseAndFaceDetection:
             "optional": {
                 "retarget_image": ("IMAGE", {"default": None, "tooltip": "Optional reference image for pose retargeting"}),
                 "face_padding": ("INT", {"default": 0, "min": 0, "max": 512, "step": 1, "tooltip": "When > 0, the detected face images are padded and resized to 512x512"}),
+                "sam3_model": (sam3_choices(), {"default": "none", "tooltip": "SAM 3 / 3.1 checkpoint from 'ComfyUI/models/checkpoints' (sam3.1_multiplex_fp16.safetensors is downloaded on first use when missing). When set, every frame's person is segmented from its detected bbox and body keypoints, no text prompt and no tracking; the mask output is empty with 'none'"}),
             },
         }
 
-    RETURN_TYPES = ("POSEDATA", "IMAGE", "STRING", "BBOX", "BBOX,")
-    RETURN_NAMES = ("pose_data", "face_images", "key_frame_body_points", "bboxes", "face_bboxes")
+    RETURN_TYPES = ("POSEDATA", "IMAGE", "STRING", "BBOX", "BBOX,", "MASK")
+    RETURN_NAMES = ("pose_data", "face_images", "key_frame_body_points", "bboxes", "face_bboxes", "mask")
     FUNCTION = "process"
     CATEGORY = "WanAnimatePreprocess"
-    DESCRIPTION = "Detects human poses and face images from input images. Optionally retargets poses based on a reference image."
+    DESCRIPTION = "Detects human poses and face images from input images, optionally retargets poses based on a reference image, and with a SAM3 checkpoint selected segments the person on every frame from its bbox and keypoints."
 
-    def process(self, model, images, width, height, retarget_image=None, face_padding=0):
+    def process(self, model, images, width, height, retarget_image=None, face_padding=0, sam3_model="none"):
         detector = model["yolo"]
         pose_model = model["vitpose"]
         B, H, W, C = images.shape
@@ -234,7 +236,12 @@ class PoseAndFaceDetection:
             "pose_metas_original": pose_metas,
         }
 
-        return (pose_data, face_images_tensor, json.dumps(points_dict_list), [bbox_ints], face_bboxes)
+        if sam3_model != "none":
+            mask = segment_frames(load_sam3(sam3_model), images, bboxes, pose_metas)
+        else:
+            mask = torch.zeros(B, H, W)
+
+        return (pose_data, face_images_tensor, json.dumps(points_dict_list), [bbox_ints], face_bboxes, mask)
 
 class DrawViTPose:
     @classmethod
@@ -496,14 +503,16 @@ class PoseDetectionOneToAllAnimation:
 
 NODE_CLASS_MAPPINGS = {
     "OnnxDetectionModelLoader": OnnxDetectionModelLoader,
-    "PoseAndFaceDetection": PoseAndFaceDetection,
+    "WanAnimateV1Preprocess": WanAnimateV1Preprocess,
+    "PoseAndFaceDetection": WanAnimateV1Preprocess,  # former name, keeps saved workflows loading
     "DrawViTPose": DrawViTPose,
     "PoseRetargetPromptHelper": PoseRetargetPromptHelper,
     "PoseDetectionOneToAllAnimation": PoseDetectionOneToAllAnimation,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "OnnxDetectionModelLoader": "ONNX Detection Model Loader",
-    "PoseAndFaceDetection": "Pose and Face Detection",
+    "WanAnimateV1Preprocess": "WanAnimate V1 Preprocess",
+    "PoseAndFaceDetection": "WanAnimate V1 Preprocess",
     "DrawViTPose": "Draw ViT Pose",
     "PoseRetargetPromptHelper": "Pose Retarget Prompt Helper",
     "PoseDetectionOneToAllAnimation": "Pose Detection OneToAll Animation",
