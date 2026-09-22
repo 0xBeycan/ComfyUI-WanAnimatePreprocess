@@ -32,11 +32,15 @@ SAM3_SIZE = 1008
 # ankles in the body layout (see guard.BODY_NAMES).
 PROMPT_KEYPOINTS = (0, 1, 2, 5, 8, 11, 10, 13)
 NOSE, NECK, R_SHOULDER, L_SHOULDER, R_HIP, L_HIP = 0, 1, 2, 5, 8, 11
-# Keypoints sit on joints, so dark low-texture clothing between them carries no positive
-# evidence and the decoder drops parts of it (a close-up lost the lower half of a jacket).
-# These fractions down the shoulder-to-hip line, or below the shoulders when the hips are
-# out of frame, put points on the clothing itself.
+# Keypoints sit on joints, so the body between them carries no positive evidence and the
+# decoder drops parts of it: a close-up lost the lower half of a jacket, and a dancer's
+# legs dropped out of the mask on the frames they moved fastest, while the knees the pose
+# model was sure of sat outside it. These fractions along a limb or the torso put points
+# on the body itself, halfway between the joints.
 TORSO_FRACTIONS = (0.35, 0.65)
+LIMB_FRACTIONS = (0.5,)
+# Limbs to put a point on, as (from, to) keypoints: thighs, shins and upper arms.
+LIMBS = ((R_HIP, 9), (L_HIP, 12), (9, 10), (12, 13), (R_SHOULDER, 3), (L_SHOULDER, 6))
 MIN_KEYPOINT_CONF = 0.3
 # The previous frame's mask is given to the decoder as a prior alongside the box and the
 # points: on a close-up, where the person fills the frame and the boundary is ambiguous,
@@ -73,18 +77,24 @@ def fill_holes(mask):
     return out
 
 
-def torso_points(kps, threshold):
-    """Points on the clothing between the shoulders and the hips, in normalised coordinates."""
-    if kps[R_SHOULDER][2] <= threshold or kps[L_SHOULDER][2] <= threshold:
-        return []
-    shoulder = ((kps[R_SHOULDER][0] + kps[L_SHOULDER][0]) / 2, (kps[R_SHOULDER][1] + kps[L_SHOULDER][1]) / 2)
-    hips = [kps[i] for i in (R_HIP, L_HIP) if kps[i][2] > threshold]
-    if hips:
-        hip = (sum(h[0] for h in hips) / len(hips), sum(h[1] for h in hips) / len(hips))
-        return [(shoulder[0] + t * (hip[0] - shoulder[0]), shoulder[1] + t * (hip[1] - shoulder[1])) for t in TORSO_FRACTIONS]
-    # the hips are out of frame: step down from the shoulders by their own width
-    span = abs(kps[R_SHOULDER][0] - kps[L_SHOULDER][0]) or 0.15
-    return [(shoulder[0], min(shoulder[1] + t * span, 0.99)) for t in (1.0, 2.0)]
+def body_points(kps, threshold):
+    """Points on the body between the joints, in normalised coordinates: down the torso and
+    along every limb whose two ends the pose model is sure of."""
+    points = []
+    if kps[R_SHOULDER][2] > threshold and kps[L_SHOULDER][2] > threshold:
+        shoulder = ((kps[R_SHOULDER][0] + kps[L_SHOULDER][0]) / 2, (kps[R_SHOULDER][1] + kps[L_SHOULDER][1]) / 2)
+        hips = [kps[i] for i in (R_HIP, L_HIP) if kps[i][2] > threshold]
+        if hips:
+            hip = (sum(h[0] for h in hips) / len(hips), sum(h[1] for h in hips) / len(hips))
+            points += [(shoulder[0] + t * (hip[0] - shoulder[0]), shoulder[1] + t * (hip[1] - shoulder[1])) for t in TORSO_FRACTIONS]
+        else:
+            # the hips are out of frame: step down from the shoulders by their own width
+            span = abs(kps[R_SHOULDER][0] - kps[L_SHOULDER][0]) or 0.15
+            points += [(shoulder[0], min(shoulder[1] + t * span, 0.99)) for t in (1.0, 2.0)]
+    for a, b in LIMBS:
+        if kps[a][2] > threshold and kps[b][2] > threshold:
+            points += [(kps[a][0] + t * (kps[b][0] - kps[a][0]), kps[a][1] + t * (kps[b][1] - kps[a][1])) for t in LIMB_FRACTIONS]
+    return points
 
 
 _loaded = {"name": None, "model": None}
@@ -193,7 +203,7 @@ def segment_frames(model, images, bboxes, pose_metas, refine=True, temporal=True
                                       device=device, dtype=dtype)
         kps = pose_metas[i]["keypoints_body"]
         points = [(kps[k][0], kps[k][1]) for k in PROMPT_KEYPOINTS if kps[k][2] > MIN_KEYPOINT_CONF]
-        points += torso_points(kps, MIN_KEYPOINT_CONF)
+        points += body_points(kps, MIN_KEYPOINT_CONF)
         points = [(x * SAM3_SIZE, y * SAM3_SIZE) for x, y in points]
         if points:
             point_inputs = {"point_coords": torch.tensor([points], device=device, dtype=dtype),
